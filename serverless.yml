@@ -1,0 +1,64 @@
+service: falafel-inc-order-processor
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  region: us-east-1
+  environment:
+    TEXTBELT_API_KEY: ${env:TEXTBELT_API_KEY, 'textbelt'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:UpdateItem
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/falafel-analytics
+
+functions:
+  processOrder:
+    handler: processOrder.processOrder
+    events:
+      - http:
+          path: process-order
+          method: post
+          cors: true
+  
+  handleInboundCall:
+    handler: inbound-webhook.handleInboundCall
+    events:
+      - http:
+          path: inbound-call
+          method: post
+          cors: true
+
+  handlePostCallAnalysis:
+    handler: postcall-analysis.handlePostCallAnalysis
+    events:
+      - http:
+          path: postcall-analysis
+          method: post
+          cors: true
+
+resources:
+  Resources:
+    FalafelAnalyticsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: falafel-analytics
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: restaurant_phone
+            AttributeType: S
+        KeySchema:
+          - AttributeName: restaurant_phone
+            KeyType: HASH
+
+plugins:
+  - serverless-offline
+
+custom:
+  serverless-offline:
+    httpPort: 3000 

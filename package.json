@@ -1,0 +1,31 @@
+{
+  "name": "falafel-inc-order-processor",
+  "version": "1.0.0",
+  "description": "Lambda function to process food orders and send SMS notifications",
+  "main": "processOrder.js",
+  "scripts": {
+    "deploy": "serverless deploy",
+    "offline": "serverless offline",
+    "test": "node test-local.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1691.0"
+  },
+  "devDependencies": {
+    "serverless": "^4.0.0",
+    "serverless-offline": "^14.0.0",
+    "dotenv": "^16.3.1"
+  },
+  "keywords": [
+    "serverless",
+    "lambda",
+    "textbelt",
+    "sms",
+    "food-orders"
+  ],
+  "author": "Falafel Inc",
+  "license": "MIT"
+} 
