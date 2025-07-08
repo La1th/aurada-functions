@@ -2,10 +2,12 @@ service: falafel-inc-order-processor
 
 provider:
   name: aws
-  runtime: nodejs22.x
+  runtime: nodejs20.x
   region: us-east-1
   environment:
     TEXTBELT_API_KEY: ${env:TEXTBELT_API_KEY, 'textbelt'}
+    SQUARE_ENVIRONMENT: ${env:SQUARE_ENVIRONMENT, 'sandbox'}
+    CATALOG_TABLE_NAME: ${env:CATALOG_TABLE_NAME, 'restaurant-catalog'}
   iam:
     role:
       statements:
@@ -16,6 +18,29 @@ provider:
             - dynamodb:PutItem
           Resource:
             - arn:aws:dynamodb:${self:provider.region}:*:table/falafel-analytics
+        - Effect: Allow
+          Action:
+            - dynamodb:Query
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/restaurant-catalog
+        - Effect: Allow
+          Action:
+            - dynamodb:Scan
+            - dynamodb:Query
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/redbird-menu
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource:
+            - arn:aws:secretsmanager:${self:provider.region}:*:secret:square-api-keys*
+            - arn:aws:secretsmanager:${self:provider.region}:*:secret:textbelt-api-key*
 
 functions:
   processOrder:
@@ -42,6 +67,71 @@ functions:
           method: post
           cors: true
 
+  addToCart:
+    handler: cart.addToCart
+    events:
+      - http:
+          path: add-to-cart
+          method: post
+          cors: true
+
+  removeFromCart:
+    handler: cart.removeFromCart
+    events:
+      - http:
+          path: remove-from-cart
+          method: post
+          cors: true
+
+  getCartSummary:
+    handler: cart.getCartSummary
+    events:
+      - http:
+          path: get-cart-summary
+          method: post
+          cors: true
+
+  createSquareOrder:
+    handler: createSquareOrder.createSquareOrder
+    events:
+      - httpApi:
+          path: /create-square-order
+          method: post
+
+  createPaymentLink:
+    handler: createPaymentLink.createPaymentLink
+    events:
+      - httpApi:
+          path: /create-payment-link
+          method: post
+
+  createOrderAndPaymentLink:
+    handler: createOrderAndPaymentLink.createOrderAndPaymentLink
+    events:
+      - httpApi:
+          path: /create-order-payment-link
+          method: post
+    timeout: 60  # Increase to 60 seconds for complete workflow
+    memorySize: 512  # Increase memory for better performance
+
+  syncCatalog:
+    handler: syncCatalog.syncCatalog
+    events:
+      - httpApi:
+          path: /sync-catalog
+          method: post
+    timeout: 300  # 5 minutes for catalog sync
+
+  getCatalog:
+    handler: syncCatalog.getCatalog
+    events:
+      - httpApi:
+          path: /get-catalog
+          method: get
+      - httpApi:
+          path: /get-catalog
+          method: post
+
 resources:
   Resources:
     FalafelAnalyticsTable:
@@ -55,6 +145,39 @@ resources:
         KeySchema:
           - AttributeName: restaurant_phone
             KeyType: HASH
+
+    RestaurantCatalogTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: restaurant-catalog
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: agent_number
+            AttributeType: S
+          - AttributeName: item_name
+            AttributeType: S
+        KeySchema:
+          - AttributeName: agent_number
+            KeyType: HASH      # Partition Key
+          - AttributeName: item_name
+            KeyType: RANGE     # Sort Key
+
+    # RedbirdMenuTable already exists, commenting out to avoid deployment conflicts
+    # RedbirdMenuTable:
+    #   Type: AWS::DynamoDB::Table
+    #   Properties:
+    #     TableName: redbird-menu
+    #     BillingMode: PAY_PER_REQUEST
+    #     AttributeDefinitions:
+    #       - AttributeName: item_name
+    #         AttributeType: S
+    #       - AttributeName: variation
+    #         AttributeType: S
+    #     KeySchema:
+    #       - AttributeName: item_name
+    #         KeyType: HASH      # Partition Key
+    #       - AttributeName: variation
+    #         KeyType: RANGE     # Sort Key
 
 plugins:
   - serverless-offline

@@ -1,3 +1,4 @@
+require('dotenv').config();
 const https = require('https');
 
 module.exports.processOrder = async (event) => {
@@ -15,14 +16,20 @@ module.exports.processOrder = async (event) => {
     // Log only essential info, not the full body with timestamps
     console.log('Processing order request from:', body.name || 'unknown source');
 
-    // Extract data - handle both direct format and Retell's nested format
-    let total, customerPhone;
+    // Extract data - handle multiple formats
+    let total, customerPhone, orderItems = [];
     
     if (body.args) {
       // Retell format: data is nested in 'args' object
       total = body.args.total;
       customerPhone = body.args.customerPhone;
       console.log('Using Retell format - args:', body.args);
+    } else if (body.cartSummary) {
+      // Cart format: extract from cart summary
+      total = body.cartSummary.total;
+      customerPhone = body.customerPhone;
+      orderItems = body.cartSummary.items || [];
+      console.log('Using cart format - items:', orderItems.length);
     } else {
       // Direct format: data is at root level
       total = body.total;
@@ -30,7 +37,7 @@ module.exports.processOrder = async (event) => {
       console.log('Using direct format');
     }
 
-    console.log('Extracted data:', { total, customerPhone });
+    console.log('Extracted data:', { total, customerPhone, itemCount: orderItems.length });
 
     // Validate required fields
     if (!total || !customerPhone) {
@@ -50,11 +57,26 @@ module.exports.processOrder = async (event) => {
     }
 
     // Format the total - check if dollar sign is already present
-    const formattedTotal = total.startsWith('$') ? total : `$${total}`;
+    const formattedTotal = total.toString().startsWith('$') ? total : `$${total}`;
     console.log('Formatted total:', formattedTotal);
 
+    // Create order summary for SMS
+    let orderSummary = '';
+    if (orderItems.length > 0) {
+      // Create itemized list
+      const itemList = orderItems.map(item => {
+        let itemText = `${item.quantity} ${item.name}`;
+        if (item.specialInstructions) {
+          itemText += ` (${item.specialInstructions})`;
+        }
+        return itemText;
+      }).join(', ');
+      
+      orderSummary = `Your order: ${itemList}. `;
+    }
+
     // Format the SMS message
-    const message = `Thank you for choosing Red Bird Chicken! 🐔 Your order total is ${formattedTotal}. You can checkout using this link: squaredotcom.`;
+    const message = `Thank you for choosing Red Bird Chicken! 🐔 Your order total is ${formattedTotal}.  No checkout needed — this was just a demo. Curious how this AI works? Visit www.aurada.ai to see how we can help your business grow.`;
 
     // Send SMS using TextBelt
     const smsResult = await sendSMS(customerPhone, message);
@@ -71,7 +93,9 @@ module.exports.processOrder = async (event) => {
       body: JSON.stringify({
         success: true,
         message: 'Order processed and SMS sent successfully',
-        smsResult: smsResult
+        smsResult: smsResult,
+        orderTotal: formattedTotal,
+        itemCount: orderItems.length
       })
     };
 
