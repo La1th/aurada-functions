@@ -1,4 +1,4 @@
-# Falafel Inc Order Processor
+# Yapn Order Processor
 
 A serverless Lambda function built with Serverless Framework 4 and Node.js 22 that processes food orders from voice AI agents and sends SMS notifications via Twilio.
 

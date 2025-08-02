@@ -1,4 +1,4 @@
-service: falafel-inc-order-processor
+service: yapn-order-processor
 
 provider:
   name: aws
@@ -6,8 +6,10 @@ provider:
   region: us-east-1
   environment:
     TEXTBELT_API_KEY: ${env:TEXTBELT_API_KEY, 'textbelt'}
-    SQUARE_ENVIRONMENT: ${env:SQUARE_ENVIRONMENT, 'sandbox'}
+    SQUARE_ENVIRONMENT: ${env:SQUARE_ENVIRONMENT, 'production'}
     CATALOG_TABLE_NAME: ${env:CATALOG_TABLE_NAME, 'restaurant-catalog'}
+    OAUTH_STATE_TABLE: ${env:OAUTH_STATE_TABLE, 'square-oauth-state'}
+    MERCHANTS_TABLE: ${env:MERCHANTS_TABLE, 'square-merchants'}
   iam:
     role:
       statements:
@@ -17,7 +19,7 @@ provider:
             - dynamodb:GetItem
             - dynamodb:PutItem
           Resource:
-            - arn:aws:dynamodb:${self:provider.region}:*:table/falafel-analytics
+            - arn:aws:dynamodb:${self:provider.region}:*:table/yapn-analytics
         - Effect: Allow
           Action:
             - dynamodb:Query
@@ -37,20 +39,46 @@ provider:
             - arn:aws:dynamodb:${self:provider.region}:*:table/redbird-menu
         - Effect: Allow
           Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:DeleteItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/square-oauth-state
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/square-merchants
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/session-carts
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/phoneNumberClientMap
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/clientMenu
+        - Effect: Allow
+          Action:
             - secretsmanager:GetSecretValue
           Resource:
             - arn:aws:secretsmanager:${self:provider.region}:*:secret:square-api-keys*
+            - arn:aws:secretsmanager:${self:provider.region}:*:secret:square-oauth-keys*
             - arn:aws:secretsmanager:${self:provider.region}:*:secret:textbelt-api-key*
 
 functions:
-  processOrder:
-    handler: processOrder.processOrder
-    events:
-      - http:
-          path: process-order
-          method: post
-          cors: true
-  
   handleInboundCall:
     handler: inbound-webhook.handleInboundCall
     events:
@@ -75,11 +103,27 @@ functions:
           method: post
           cors: true
 
+  addToCartSandbox:
+    handler: cart.addToCart
+    events:
+      - http:
+          path: sandbox/add-to-cart
+          method: post
+          cors: true
+
   removeFromCart:
     handler: cart.removeFromCart
     events:
       - http:
           path: remove-from-cart
+          method: post
+          cors: true
+
+  removeFromCartSandbox:
+    handler: cart.removeFromCart
+    events:
+      - http:
+          path: sandbox/remove-from-cart
           method: post
           cors: true
 
@@ -91,18 +135,42 @@ functions:
           method: post
           cors: true
 
-  createSquareOrder:
-    handler: createSquareOrder.createSquareOrder
+  getCartSummarySandbox:
+    handler: cart.getCartSummary
     events:
-      - httpApi:
-          path: /create-square-order
+      - http:
+          path: sandbox/get-cart-summary
           method: post
+          cors: true
+
+  upsell:
+    handler: cart.upsell
+    events:
+      - http:
+          path: upsell
+          method: post
+          cors: true
+
+  upsellSandbox:
+    handler: cart.upsell
+    events:
+      - http:
+          path: sandbox/upsell
+          method: post
+          cors: true
 
   createPaymentLink:
     handler: createPaymentLink.createPaymentLink
     events:
       - httpApi:
           path: /create-payment-link
+          method: post
+
+  createPaymentLinkSandbox:
+    handler: createPaymentLink.createPaymentLink
+    events:
+      - httpApi:
+          path: /sandbox/create-payment-link
           method: post
 
   createOrderAndPaymentLink:
@@ -114,11 +182,28 @@ functions:
     timeout: 60  # Increase to 60 seconds for complete workflow
     memorySize: 512  # Increase memory for better performance
 
+  createOrderAndPaymentLinkSandbox:
+    handler: createOrderAndPaymentLink.createOrderAndPaymentLink
+    events:
+      - httpApi:
+          path: /sandbox/create-order-payment-link
+          method: post
+    timeout: 60  # Increase to 60 seconds for complete workflow
+    memorySize: 512  # Increase memory for better performance
+
   syncCatalog:
     handler: syncCatalog.syncCatalog
     events:
       - httpApi:
           path: /sync-catalog
+          method: post
+    timeout: 300  # 5 minutes for catalog sync
+
+  syncCatalogSandbox:
+    handler: syncCatalog.syncCatalog
+    events:
+      - httpApi:
+          path: /sandbox/sync-catalog
           method: post
     timeout: 300  # 5 minutes for catalog sync
 
@@ -132,12 +217,38 @@ functions:
           path: /get-catalog
           method: post
 
+  getCatalogSandbox:
+    handler: syncCatalog.getCatalog
+    events:
+      - httpApi:
+          path: /sandbox/get-catalog
+          method: get
+      - httpApi:
+          path: /sandbox/get-catalog
+          method: post
+
+  squareAuthorize:
+    handler: squareAuthorize.authorize
+    events:
+      - httpApi:
+          path: /square/authorize
+          method: get
+    timeout: 30
+
+  squareCallback:
+    handler: squareCallback.callback
+    events:
+      - httpApi:
+          path: /square/callback
+          method: get
+    timeout: 30
+
 resources:
   Resources:
-    FalafelAnalyticsTable:
+    YapnAnalyticsTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: falafel-analytics
+        TableName: yapn-analytics
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
           - AttributeName: restaurant_phone
@@ -162,6 +273,42 @@ resources:
           - AttributeName: item_name
             KeyType: RANGE     # Sort Key
 
+    SquareOAuthStateTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: square-oauth-state
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: state
+            AttributeType: S
+        KeySchema:
+          - AttributeName: state
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: expires_at
+          Enabled: true
+
+    SquareMerchantsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: square-merchants
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: restaurant_id
+            AttributeType: S
+          - AttributeName: merchant_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: restaurant_id
+            KeyType: HASH      # Partition Key
+        GlobalSecondaryIndexes:
+          - IndexName: MerchantIdIndex
+            KeySchema:
+              - AttributeName: merchant_id
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
     # RedbirdMenuTable already exists, commenting out to avoid deployment conflicts
     # RedbirdMenuTable:
     #   Type: AWS::DynamoDB::Table
@@ -178,6 +325,21 @@ resources:
     #         KeyType: HASH      # Partition Key
     #       - AttributeName: variation
     #         KeyType: RANGE     # Sort Key
+
+    SessionCartsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: session-carts
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: call_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: call_id
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
 
 plugins:
   - serverless-offline

@@ -1,7 +1,7 @@
 const AWS = require('aws-sdk');
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 
-const TABLE_NAME = 'falafel-analytics';
+const TABLE_NAME = 'yapn-analytics';
 
 module.exports.handlePostCallAnalysis = async (event) => {
   console.log('Handling post-call analysis webhook...');

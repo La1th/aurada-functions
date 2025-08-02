@@ -53,7 +53,7 @@ async function testOrderPaymentLink() {
         }
       ],
       metadata: {
-        customerPhone: "+15005550006",
+        customerPhone: "+17039699580",
         orderSource: "voice-ai",
         specialInstructions: "Extra sauce packets please"
       }
@@ -62,7 +62,7 @@ async function testOrderPaymentLink() {
       allowTipping: true
     },
     prePopulatedData: {
-      buyerPhoneNumber: "+15005550006"
+      buyerPhoneNumber: "+17039699580"
     },
     paymentNote: "Red Bird Chicken order payment via voice AI"
   };
@@ -267,14 +267,14 @@ async function testComplexOrder() {
           deliveryDetails: {
             recipient: {
               displayName: "The Johnson Family",
-              phoneNumber: "+15005550006"
+              phoneNumber: "+17039699580"
             },
             note: "Please ring doorbell, family order with kids"
           }
         }
       ],
       metadata: {
-        customerPhone: "+15005550006",
+        customerPhone: "+17039699580",
         orderType: "family-meal",
         specialInstructions: "Extra napkins and sauce packets for kids",
         deliveryPreference: "contactless"
@@ -290,7 +290,7 @@ async function testComplexOrder() {
       ]
     },
     prePopulatedData: {
-      buyerPhoneNumber: "+15005550006",
+      buyerPhoneNumber: "+17039699580",
       buyerEmailAddress: "johnson.family@example.com"
     },
     paymentNote: "Red Bird Chicken family dinner - contactless delivery preferred"

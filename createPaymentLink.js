@@ -1,17 +1,88 @@
 require('dotenv').config();
 const { SquareClient, SquareEnvironment, SquareError } = require('square');
 const { v4: uuidv4 } = require('uuid');
+const AWS = require('aws-sdk');
 
-// Initialize Square client
-const squareClient = new SquareClient({
-  token: process.env.SQUARE_ACCESS_TOKEN,
-  environment: process.env.SQUARE_ENVIRONMENT === 'production' ? SquareEnvironment.Production : SquareEnvironment.Sandbox
+// Configure AWS region (Lambda uses IAM role for credentials)
+AWS.config.update({ 
+  region: process.env.AWS_REGION || 'us-east-1'
 });
+const secretsManager = new AWS.SecretsManager();
+
+// Cache for Square credentials (separate cache for each environment)
+let squareCredentialsCache = {
+  sandbox: null,
+  production: null
+};
+let squareClientCache = {
+  sandbox: null,
+  production: null
+};
+
+// Function to detect environment from request path
+function detectEnvironmentFromPath(event) {
+  const path = event.rawPath || event.path || '';
+  console.log('Detecting environment from path:', path);
+  
+  if (path.includes('/sandbox/')) {
+    console.log('Environment detected: sandbox');
+    return 'sandbox';
+  } else {
+    console.log('Environment detected: production (default)');
+    return 'production';
+  }
+}
+
+// Function to get Square credentials from AWS Secrets Manager
+async function getSquareCredentials(environment = 'production') {
+  if (squareCredentialsCache[environment]) {
+    console.log(`Using cached ${environment} credentials`);
+    return squareCredentialsCache[environment];
+  }
+  
+  try {
+    // Use environment-specific secret names
+    const secretId = `square-api-keys-${environment}`;
+    console.log(`Retrieving Square credentials from secret: ${secretId}`);
+    
+    const result = await secretsManager.getSecretValue({ SecretId: secretId }).promise();
+    squareCredentialsCache[environment] = JSON.parse(result.SecretString);
+    
+    // Initialize Square client with retrieved credentials
+    squareClientCache[environment] = new SquareClient({
+      token: squareCredentialsCache[environment].SQUARE_ACCESS_TOKEN,
+      environment: environment === 'production' ? SquareEnvironment.Production : SquareEnvironment.Sandbox
+    });
+    
+    console.log(`Successfully initialized ${environment} Square client`);
+    return squareCredentialsCache[environment];
+  } catch (error) {
+    console.error(`Error retrieving Square credentials for ${environment}:`, error);
+    throw new Error(`Failed to retrieve Square API credentials for ${environment}`);
+  }
+}
+
+// Function to get Square client for specific environment
+function getSquareClient(environment = 'production') {
+  return squareClientCache[environment];
+}
 
 module.exports.createPaymentLink = async (event) => {
   console.log('Creating payment link with order...');
   
   try {
+    // Detect environment from request path
+    const environment = detectEnvironmentFromPath(event);
+    console.log(`Operating in ${environment} environment`);
+    
+    // Get Square credentials for detected environment
+    await getSquareCredentials(environment);
+    const squareClient = getSquareClient(environment);
+    
+    if (!squareClient) {
+      throw new Error(`Square client not initialized for ${environment} environment`);
+    }
+
     let requestBody;
     if (typeof event.body === 'string') {
       requestBody = JSON.parse(event.body);

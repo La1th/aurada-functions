@@ -9,53 +9,124 @@ AWS.config.update({
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 const secretsManager = new AWS.SecretsManager();
 
-// Cache for Square credentials
-let squareCredentials = null;
-let squareClient = null;
+// Cache for Square credentials (separate cache for each environment)
+let squareCredentialsCache = {
+  sandbox: null,
+  production: null
+};
+let squareClientCache = {
+  sandbox: null,
+  production: null
+};
 
-// Function to get Square credentials from AWS Secrets Manager
-async function getSquareCredentials() {
-  if (squareCredentials) {
-    return squareCredentials;
-  }
+// Function to detect environment from request path
+function detectEnvironmentFromPath(event) {
+  const path = event.rawPath || event.path || '';
+  console.log('Detecting environment from path:', path);
   
-  try {
-    const result = await secretsManager.getSecretValue({ SecretId: 'square-api-keys' }).promise();
-    squareCredentials = JSON.parse(result.SecretString);
-    
-    // Initialize Square client with retrieved credentials
-    squareClient = new SquareClient({
-      token: squareCredentials.SQUARE_ACCESS_TOKEN,
-      environment: squareCredentials.SQUARE_ENVIRONMENT === 'production' ? SquareEnvironment.Production : SquareEnvironment.Sandbox
-    });
-    
-    return squareCredentials;
-  } catch (error) {
-    console.error('Error retrieving Square credentials from Secrets Manager:', error);
-    throw new Error('Failed to retrieve Square API credentials');
+  if (path.includes('/sandbox/')) {
+    console.log('Environment detected: sandbox');
+    return 'sandbox';
+  } else {
+    console.log('Environment detected: production (default)');
+    return 'production';
   }
 }
 
+// Function to get Square credentials from AWS Secrets Manager
+async function getSquareCredentials(environment = 'production') {
+  if (squareCredentialsCache[environment]) {
+    console.log(`Using cached ${environment} credentials`);
+    return squareCredentialsCache[environment];
+  }
+  
+  try {
+    // Use environment-specific secret names
+    const secretId = `square-api-keys-${environment}`;
+    console.log(`Retrieving Square credentials from secret: ${secretId}`);
+    
+    const result = await secretsManager.getSecretValue({ SecretId: secretId }).promise();
+    squareCredentialsCache[environment] = JSON.parse(result.SecretString);
+    
+    // Initialize Square client with retrieved credentials
+    squareClientCache[environment] = new SquareClient({
+      token: squareCredentialsCache[environment].SQUARE_ACCESS_TOKEN,
+      environment: environment === 'production' ? SquareEnvironment.Production : SquareEnvironment.Sandbox
+    });
+    
+    console.log(`Successfully initialized ${environment} Square client`);
+    return squareCredentialsCache[environment];
+  } catch (error) {
+    console.error(`Error retrieving Square credentials for ${environment}:`, error);
+    throw new Error(`Failed to retrieve Square API credentials for ${environment}`);
+  }
+}
+
+// Function to get Square client for specific environment
+function getSquareClient(environment = 'production') {
+  return squareClientCache[environment];
+}
+
 const REDBIRD_MENU_TABLE = 'redbird-menu';
+const SESSION_CARTS_TABLE = 'session-carts';
 
 // Simple UUID alternative using timestamp and random number
 function generateIdempotencyKey() {
   return `ORDER_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
-module.exports.createOrderAndPaymentLink = async (event) => {
-  console.log('Processing pre-validated cart and creating payment link...');
+// Session cart helper functions
+function extractCallId(body) {
+  return body.call?.call_id;
+}
+
+async function getSessionCart(callId) {
+  if (!callId) return [];
+  
+  const params = {
+    TableName: SESSION_CARTS_TABLE,
+    Key: { call_id: callId }
+  };
   
   try {
-    // Get Square credentials from Secrets Manager
-    await getSquareCredentials();
+    const result = await dynamodb.get(params).promise();
+    return result.Item?.cart_items || [];
+  } catch (error) {
+    console.error('Error getting session cart:', error);
+    return [];
+  }
+}
+
+module.exports.createOrderAndPaymentLink = async (event) => {
+  console.log('Processing session cart and creating payment link...');
+  
+  // Add 500ms buffer as requested
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  
+  let cartData; // Declare for error handling scope
+  
+  try {
+    // Detect environment from request path
+    const environment = detectEnvironmentFromPath(event);
+    console.log(`Operating in ${environment} environment`);
     
-    // Debug logging - see exactly what we're receiving
-    console.log('Raw event:', JSON.stringify(event, null, 2));
-    console.log('Event body type:', typeof event.body);
-    console.log('Event body content:', event.body);
+    // Get Square credentials for detected environment
+    await getSquareCredentials(environment);
+    const squareClient = getSquareClient(environment);
     
-    // Parse the request body (expecting cart data from addToCart functions)
+    if (!squareClient) {
+      throw new Error(`Square client not initialized for ${environment} environment`);
+    }
+
+    // Essential logging - clean and focused
+    console.log('Request info:', {
+      path: event.rawPath,
+      method: event.requestContext?.http?.method,
+      environment: environment,
+      bodyType: typeof event.body
+    });
+    
+    // Parse the request body
     let requestBody;
     if (typeof event.body === 'string') {
       requestBody = JSON.parse(event.body);
@@ -63,40 +134,58 @@ module.exports.createOrderAndPaymentLink = async (event) => {
       requestBody = event.body;
     }
 
-    console.log('Parsed request body:', JSON.stringify(requestBody, null, 2));
-
-    // Handle Retell webhook format - cart data is in 'args' property
-    let cartData;
-    if (requestBody.args && (requestBody.name === 'payment_link_text' || requestBody.name === 'createOrderAndPaymentLink')) {
-      console.log('Detected Retell webhook format, extracting cart data from args...');
-      cartData = requestBody.args;
-    } else {
-      // Direct cart data format
-      cartData = requestBody;
+    // Extract call ID for session cart
+    const callId = extractCallId(requestBody);
+    if (!callId) {
+      return createErrorResponse(400, 'Missing call ID in request');
     }
 
-    console.log('Payment link request received:', {
-      hasCartSummary: !!cartData.cartSummary,
-      hasCart: !!cartData.updatedCart,
-      itemsCount: cartData.updatedCart?.length || 0,
+    console.log(`Creating order for call: ${callId}`);
+
+    // Get session cart (contains full DynamoDB data)
+    const sessionCart = await getSessionCart(callId);
+    
+    if (!sessionCart || sessionCart.length === 0) {
+      return createErrorResponse(400, 'Cart is empty. Please add items first.');
+    }
+
+    // Calculate cart summary from session cart
+    const subtotal = sessionCart.reduce((sum, item) => sum + item.lineTotal, 0);
+    const itemCount = sessionCart.reduce((sum, item) => sum + item.quantity, 0);
+    
+    const cartSummary = {
+      items: sessionCart,
+      subtotal: subtotal,
+      itemCount: itemCount,
+      message: 'Tax will be calculated at checkout'
+    };
+
+    // Extract customer info and other data from request  
+    const phone = requestBody.args?.phone || requestBody.phone;
+    
+    cartData = {
+      updatedCart: sessionCart,
+      cartSummary: cartSummary,
+      customerInfo: requestBody.args?.customerInfo || requestBody.customerInfo || (phone ? { phone: phone } : null),
+      locationId: requestBody.args?.locationId || requestBody.locationId,
+      checkoutOptions: requestBody.args?.checkoutOptions || requestBody.checkoutOptions,
+      description: requestBody.args?.description || requestBody.description
+    };
+
+    console.log('Payment link request with session cart:', {
+      itemsCount: sessionCart.length,
+      subtotal: subtotal,
       hasCustomerInfo: !!cartData.customerInfo,
       hasLocationId: !!cartData.locationId
     });
-
-    // Validate required fields - expecting cart data from addToCart/getCartSummary
-    if (!cartData.updatedCart || cartData.updatedCart.length === 0) {
-      return createErrorResponse(400, 'Missing required field: updatedCart (from cart functions)');
-    }
-    if (!cartData.cartSummary) {
-      return createErrorResponse(400, 'Missing required field: cartSummary (from cart functions)');
-    }
 
     // Step 1: Convert cart data to Square format (no validation needed)
     const orderResult = convertCartToSquareOrder(cartData.updatedCart, cartData.cartSummary);
     
     // Step 2: Create Square payment link with processed order
     const paymentLinkResult = await createSquarePaymentLink({
-      locationId: cartData.locationId || squareCredentials.SQUARE_LOCATION_ID,
+      squareClient: squareClient,
+      locationId: cartData.locationId || squareCredentialsCache[environment].SQUARE_LOCATION_ID,
       lineItems: orderResult.squareLineItems,
       customerInfo: cartData.customerInfo,
       orderSummary: orderResult.orderSummary,
@@ -120,7 +209,7 @@ module.exports.createOrderAndPaymentLink = async (event) => {
       }
     }
 
-    console.log(`🎉 Complete workflow successful: ${orderResult.orderSummary.itemCount} items, $${cartData.cartSummary.subtotal.toFixed(2)} subtotal + tax by Square`);
+    console.log(`🎉 Complete workflow successful: ${orderResult.orderSummary.itemCount} items, $${cartData.cartSummary.subtotal.toFixed(2)} subtotal + tax `);
 
     return createSuccessResponse({
       success: true,
@@ -134,7 +223,16 @@ module.exports.createOrderAndPaymentLink = async (event) => {
   } catch (error) {
     console.error('Error in payment workflow:', error.message);
     console.error('Error stack:', error.stack);
-    console.error('Request body:', JSON.stringify(requestBody, null, 2));
+    
+    // Log only essential cart info, not full transcript data
+    const errorContext = cartData ? {
+      hasCartSummary: !!cartData.cartSummary,
+      hasUpdatedCart: !!cartData.updatedCart,
+      itemCount: cartData.updatedCart?.length || 0,
+      hasCustomerInfo: !!cartData.customerInfo,
+      hasLocationId: !!cartData.locationId
+    } : { cartData: 'undefined' };
+    console.error('Error context:', errorContext);
     
     return createErrorResponse(500, 'Internal server error', { 
       details: error.message,
@@ -148,17 +246,25 @@ function convertCartToSquareOrder(cartItems, cartSummary) {
   console.log('Converting cart data to Square order format...');
   
   // Build Square-ready line items from DynamoDB cart data
-  const squareLineItems = cartItems.map(item => ({
-    name: `${item.item_name} - ${item.variation}`,
-    quantity: item.quantity.toString(),
-    variationName: item.variation,
-    catalogObjectId: item.square_variation_id,
-    basePriceMoney: {
-      amount: BigInt(parseInt(item.price_money.amount)), // Already in cents from DynamoDB
-      currency: item.price_money.currency || 'USD'
-    },
-    ...(item.specialInstructions && { note: item.specialInstructions })
-  }));
+  const squareLineItems = cartItems.map(item => {
+    // Validate required price_money property
+    if (!item.price_money || !item.price_money.amount) {
+      console.error('Cart item missing price_money:', JSON.stringify(item, null, 2));
+      throw new Error(`Cart item "${item.item_name}" is missing price information. Please refresh cart.`);
+    }
+    
+    return {
+      name: `${item.item_name} - Regular`,  // Hard-code "Regular" since cart no longer includes variation
+      quantity: item.quantity.toString(),
+      variationName: "Regular",  // Hard-code "Regular" 
+      catalogObjectId: item.square_variation_id,
+      basePriceMoney: {
+        amount: BigInt(parseInt(item.price_money.amount)), // Already in cents from DynamoDB
+        currency: item.price_money.currency || 'USD'
+      },
+      ...(item.specialInstructions && { note: item.specialInstructions })
+    };
+  });
 
   // Use the cart summary data (Square will calculate tax automatically)
   const orderSummary = {
@@ -166,11 +272,11 @@ function convertCartToSquareOrder(cartItems, cartSummary) {
     subtotal: Math.round(cartSummary.subtotal * 100), // Convert to cents
     itemCount: cartSummary.itemCount,
     // Remove tax fields - Square handles tax calculation
-    taxMessage: 'Tax calculated by Square at checkout',
+    taxMessage: 'Tax will be calculated at checkout',
     createdAt: new Date().toISOString()
   };
 
-  console.log(`✅ Converted cart: ${cartItems.length} items, $${cartSummary.subtotal.toFixed(2)} subtotal (+ tax by Square)`);
+  console.log(`✅ Converted cart: ${cartItems.length} items, $${cartSummary.subtotal.toFixed(2)} subtotal (+ tax)`);
 
   return {
     orderSummary,
@@ -185,7 +291,7 @@ async function processOrderWithMenu(items) {
 }
 
 // Helper function to create Square payment link
-async function createSquarePaymentLink({ locationId, lineItems, customerInfo, orderSummary, checkoutOptions, description }) {
+async function createSquarePaymentLink({ squareClient, locationId, lineItems, customerInfo, orderSummary, checkoutOptions, description }) {
   console.log('Creating Square payment link...');
 
   const paymentLinkRequest = {

@@ -1,12 +1,11 @@
 {
-  "name": "falafel-inc-order-processor",
+  "name": "yapn-order-processor",
   "version": "1.0.0",
   "description": "Lambda function to process food orders and send SMS notifications",
-  "main": "processOrder.js",
+  "main": "createOrderAndPaymentLink.js",
   "scripts": {
     "deploy": "serverless deploy",
     "offline": "serverless offline",
-    "test": "node test-local.js",
     "test-cart": "node test-cart.js",
     "test-square": "node test-square.js",
     "test-square-pure": "node test-square-pure.js",
@@ -14,17 +13,20 @@
     "test-catalog": "node test-catalog-sync.js",
     "test-square-order": "node test-square-order.js",
     "test-workflow": "node test-order-payment-workflow.js",
-    "populate-menu": "node populate-redbird-menu.js"
+    "populate-menu": "node populate-redbird-menu.js",
+    "setup-env-secrets": "node setup-environment-secrets.js",
+    "check-secrets": "node setup-environment-secrets.js --check"
   },
   "engines": {
     "node": ">=22.0.0"
   },
   "dependencies": {
     "aws-sdk": "^2.1691.0",
-    "square": "^43.0.0"
+    "square": "^43.0.0",
+    "uuid": "^11.1.0",
+    "dotenv": "^16.5.0"
   },
   "devDependencies": {
-    "dotenv": "^16.5.0",
     "serverless": "^4.0.0",
     "serverless-offline": "^14.0.0"
   },
@@ -37,6 +39,6 @@
     "cart-management",
     "square-payments"
   ],
-  "author": "Falafel Inc",
+  "author": "Yapn",
   "license": "MIT"
 }

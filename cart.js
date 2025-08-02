@@ -6,10 +6,143 @@ AWS.config.update({
 });
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 
-const REDBIRD_MENU_TABLE = 'redbird-menu';
+const SESSION_CARTS_TABLE = 'session-carts';
+const PHONE_NUMBER_CLIENT_MAP_TABLE = 'phoneNumberClientMap';
+const CLIENT_MENU_TABLE = 'clientMenu';
 
-// Default tax rate (8.75% - adjust for your location)
-const DEFAULT_TAX_RATE = 0.0875;
+// Session cart helper functions
+function extractCallId(body) {
+  return body.call?.call_id;
+}
+
+function extractPhoneNumber(body) {
+  // Extract the restaurant phone number (the number customer called)
+  return body.call?.to_number;
+}
+
+async function getLocationFromPhoneNumber(phoneNumber) {
+  if (!phoneNumber) {
+    throw new Error('Phone number is required for location lookup');
+  }
+
+  const params = {
+    TableName: PHONE_NUMBER_CLIENT_MAP_TABLE,
+    Key: { phoneNumber: phoneNumber }
+  };
+
+  try {
+    console.log(`Looking up location for phone number: ${phoneNumber}`);
+    const result = await dynamodb.get(params).promise();
+    
+    if (!result.Item) {
+      throw new Error(`No location found for phone number: ${phoneNumber}`);
+    }
+
+    console.log(`Found location: ${result.Item.restaurantName} - ${result.Item.locationId}`);
+    return {
+      locationId: result.Item.locationId,
+      restaurantName: result.Item.restaurantName
+    };
+  } catch (error) {
+    console.error('Error looking up location:', error);
+    throw error;
+  }
+}
+
+async function getLocationMenu(restaurantName, locationId) {
+  if (!restaurantName || !locationId) {
+    throw new Error('Restaurant name and location ID are required');
+  }
+
+  const params = {
+    TableName: CLIENT_MENU_TABLE,
+    Key: { 
+      restaurantName: restaurantName,
+      locationID: locationId 
+    }
+  };
+
+  try {
+    console.log(`Getting menu for: ${restaurantName} at location: ${locationId}`);
+    const result = await dynamodb.get(params).promise();
+    
+    if (!result.Item) {
+      throw new Error(`No menu found for ${restaurantName} at location ${locationId}`);
+    }
+
+    console.log(`Found menu with ${result.Item.itemCount || 'unknown'} items`);
+    return result.Item;
+  } catch (error) {
+    console.error('Error getting location menu:', error);
+    throw error;
+  }
+}
+
+async function getSessionCart(callId) {
+  if (!callId) return [];
+  
+  const params = {
+    TableName: SESSION_CARTS_TABLE,
+    Key: { call_id: callId }
+  };
+  
+  try {
+    const result = await dynamodb.get(params).promise();
+    return result.Item?.cart_items || [];
+  } catch (error) {
+    console.error('Error getting session cart:', error);
+    return [];
+  }
+}
+
+async function saveSessionCart(callId, cartItems) {
+  if (!callId) {
+    throw new Error('Call ID required for session cart');
+  }
+  
+  const params = {
+    TableName: SESSION_CARTS_TABLE,
+    Item: {
+      call_id: callId,
+      cart_items: cartItems,
+      updated_at: new Date().toISOString(),
+      ttl: Math.floor(Date.now() / 1000) + (2 * 60 * 60) // 2 hours
+    }
+  };
+  
+  try {
+    await dynamodb.put(params).promise();
+    console.log(`Session cart saved for call: ${callId}`);
+  } catch (error) {
+    console.error('Error saving session cart:', error);
+    throw error;
+  }
+}
+
+function createSpeechFriendlySummary(sessionCart, subtotal) {
+  if (!sessionCart || sessionCart.length === 0) {
+    return "Your cart is empty.";
+  }
+
+  // Create speech-friendly item descriptions
+  const speechItems = sessionCart.map(item => {
+    let itemName = item.item_name || item.name || 'Unknown Item';
+    
+    // Apply speech transformations
+    itemName = itemName.replace(/(\d+)pc\b/g, '$1 piece'); // 2pc -> 2 piece
+    itemName = itemName.replace(/\bw\//g, 'with'); // w/ -> with
+    itemName = itemName.replace(/FCK YOU CRA/g, 'F You Cray'); // FCK YOU CRA -> F You Cray
+    
+    const quantity = item.quantity || 1;
+    return `${quantity} ${itemName}`;
+  });
+
+  // Create the summary message
+  const itemsText = speechItems.join(', ');
+  const formattedSubtotal = (subtotal || 0).toFixed(2);
+  
+  return `${itemsText}. Your total is $${formattedSubtotal} plus tax`;
+}
 
 // Add item to cart
 module.exports.addToCart = async (event) => {
@@ -24,26 +157,29 @@ module.exports.addToCart = async (event) => {
       body = event.body;
     }
 
-    // Extract data - handle both direct format and Retell's nested format
-    let currentCart, itemName, quantity, specialInstructions;
-    
-    if (body.args) {
-      // Retell format: data is nested in 'args' object
-      currentCart = body.args.currentCart || [];
-      itemName = body.args.itemName;
-      quantity = body.args.quantity || 1;
-      specialInstructions = body.args.specialInstructions || '';
-      console.log('Using Retell format - args:', body.args);
-    } else {
-      // Direct format: data is at root level
-      currentCart = body.currentCart || [];
-      itemName = body.itemName;
-      quantity = body.quantity || 1;
-      specialInstructions = body.specialInstructions || '';
-      console.log('Using direct format');
+    // Extract call ID and item data
+    const callId = extractCallId(body);
+    if (!callId) {
+      return createErrorResponse(400, 'Missing call ID in request');
     }
 
-    console.log('Add to cart request:', { itemName, quantity, specialInstructions });
+    // Extract phone number from Retell payload
+    const phoneNumber = extractPhoneNumber(body);
+    if (!phoneNumber) {
+      return createErrorResponse(400, 'Missing phone number in request - cannot determine location');
+    }
+
+    // Extract item data from args (preserve original order payload)
+    const itemName = body.args?.itemName;
+    const quantity = body.args?.quantity || 1;
+    const specialInstructions = body.args?.specialInstructions || '';
+
+    console.log(`Adding to cart for call ${callId}:`, { 
+      phoneNumber, 
+      itemName, 
+      quantity, 
+      specialInstructions 
+    });
 
     // Validate inputs
     if (!itemName) {
@@ -54,18 +190,35 @@ module.exports.addToCart = async (event) => {
       return createErrorResponse(400, 'Quantity must be a positive integer');
     }
 
-    // Find item in menu (flexible matching)
-    const menuItem = await findMenuItem(itemName);
-    if (!menuItem) {
-      const suggestions = await getSimilarItems(itemName);
-      return createErrorResponse(404, `Item "${itemName}" not found on menu`, { suggestions });
+    // Step 1: Get location from phone number
+    let locationData;
+    try {
+      locationData = await getLocationFromPhoneNumber(phoneNumber);
+    } catch (error) {
+      return createErrorResponse(404, `Location lookup failed: ${error.message}`);
     }
 
-    // Create cart item using DynamoDB data directly (ready for Square)
+    // Step 2: Get location-specific menu
+    let locationMenu;
+    try {
+      locationMenu = await getLocationMenu(locationData.restaurantName, locationData.locationId);
+    } catch (error) {
+      return createErrorResponse(404, `Menu lookup failed: ${error.message}`);
+    }
+
+    // Step 3: Find item in location menu
+    const menuItem = findMenuItemInLocationMenu(itemName, locationMenu);
+    if (!menuItem) {
+      return createErrorResponse(404, `Item "${itemName}" not found in ${locationData.restaurantName} ${locationData.locationId} menu`);
+    }
+
+    // Get existing session cart
+    const sessionCart = await getSessionCart(callId);
+
+    // Create cart item with full DynamoDB data
     const cartItem = {
       // Keep original DynamoDB fields for Square compatibility
       item_name: menuItem.item_name,
-      variation: menuItem.variation,
       price_money: menuItem.price_money,
       square_item_id: menuItem.square_item_id,
       square_variation_id: menuItem.square_variation_id,
@@ -75,39 +228,36 @@ module.exports.addToCart = async (event) => {
       // Add cart-specific fields
       quantity: quantity,
       specialInstructions: specialInstructions,
-      unitPrice: parseInt(menuItem.price_money.amount) / 100, // For display purposes
+      unitPrice: parseInt(menuItem.price_money.amount) / 100,
       lineTotal: (parseInt(menuItem.price_money.amount) / 100) * quantity,
       
-      // For backward compatibility with existing code
+      // For backward compatibility
       itemId: menuItem.square_variation_id,
-      name: `${menuItem.item_name} - ${menuItem.variation}`
+      name: menuItem.item_name
     };
 
     // Check if item already exists in cart (same item + instructions)
-    const updatedCart = [...currentCart];
-    const existingIndex = updatedCart.findIndex(item => 
+    const existingIndex = sessionCart.findIndex(item => 
       item.itemId === cartItem.itemId && 
       item.specialInstructions === cartItem.specialInstructions
     );
 
     if (existingIndex >= 0) {
       // Update existing item
-      updatedCart[existingIndex].quantity += quantity;
-      updatedCart[existingIndex].lineTotal = updatedCart[existingIndex].unitPrice * updatedCart[existingIndex].quantity;
+      sessionCart[existingIndex].quantity += quantity;
+      sessionCart[existingIndex].lineTotal = sessionCart[existingIndex].unitPrice * sessionCart[existingIndex].quantity;
     } else {
       // Add new item
-      updatedCart.push(cartItem);
+      sessionCart.push(cartItem);
     }
 
-    // Calculate totals
-    const cartSummary = calculateCartTotals(updatedCart);
+    // Save updated cart to session
+    await saveSessionCart(callId, sessionCart);
 
-    console.log('Item added successfully:', cartItem);
+    console.log('Item added successfully to session cart');
 
     return createSuccessResponse({
-      message: `Added ${quantity} ${cartItem.name} to cart`,
-      updatedCart: updatedCart,
-      cartSummary: cartSummary
+      message: `Added ${quantity} ${menuItem.item_name} to cart for ${locationData.restaurantName} ${locationData.locationId}`
     });
 
   } catch (error) {
@@ -129,69 +279,59 @@ module.exports.removeFromCart = async (event) => {
       body = event.body;
     }
 
-    // Extract data - handle both direct format and Retell's nested format
-    let currentCart, itemName, quantityToRemove;
-    
-    if (body.args) {
-      // Retell format: data is nested in 'args' object
-      currentCart = body.args.currentCart || [];
-      itemName = body.args.itemName;
-      quantityToRemove = body.args.quantityToRemove;
-      console.log('Using Retell format - args:', body.args);
-    } else {
-      // Direct format: data is at root level
-      currentCart = body.currentCart || [];
-      itemName = body.itemName;
-      quantityToRemove = body.quantityToRemove;
-      console.log('Using direct format');
+    // Extract call ID and item data
+    const callId = extractCallId(body);
+    if (!callId) {
+      return createErrorResponse(400, 'Missing call ID in request');
     }
 
-    console.log('Remove from cart request:', { itemName, quantityToRemove });
+    const itemName = body.args?.itemName;
+    const quantityToRemove = body.args?.quantityToRemove;
+
+    console.log(`Removing from cart for call ${callId}:`, { itemName, quantityToRemove });
 
     // Validate inputs
     if (!itemName) {
       return createErrorResponse(400, 'Missing required field: itemName');
     }
 
-    if (!currentCart.length) {
+    // Get session cart
+    const sessionCart = await getSessionCart(callId);
+
+    if (!sessionCart.length) {
       return createErrorResponse(400, 'Cart is empty');
     }
 
     // Find item in cart (flexible matching)
-    const cartIndex = currentCart.findIndex(item => 
+    const cartIndex = sessionCart.findIndex(item => 
       item.name.toLowerCase().includes(itemName.toLowerCase()) ||
       itemName.toLowerCase().includes(item.name.toLowerCase())
     );
 
     if (cartIndex === -1) {
-      const cartItemNames = currentCart.map(item => item.name);
+      const cartItemNames = sessionCart.map(item => item.name);
       return createErrorResponse(404, `Item "${itemName}" not found in cart`, { currentItems: cartItemNames });
     }
 
-    const updatedCart = [...currentCart];
-    const cartItem = updatedCart[cartIndex];
-
-    // Determine how much to remove
+    const cartItem = sessionCart[cartIndex];
     const removeQty = quantityToRemove || cartItem.quantity; // Remove all if not specified
 
     if (removeQty >= cartItem.quantity) {
       // Remove entire item
-      updatedCart.splice(cartIndex, 1);
+      sessionCart.splice(cartIndex, 1);
     } else {
       // Reduce quantity
-      updatedCart[cartIndex].quantity -= removeQty;
-      updatedCart[cartIndex].lineTotal = updatedCart[cartIndex].unitPrice * updatedCart[cartIndex].quantity;
+      sessionCart[cartIndex].quantity -= removeQty;
+      sessionCart[cartIndex].lineTotal = sessionCart[cartIndex].unitPrice * sessionCart[cartIndex].quantity;
     }
 
-    // Calculate totals
-    const cartSummary = calculateCartTotals(updatedCart);
+    // Save updated cart to session
+    await saveSessionCart(callId, sessionCart);
 
-    console.log('Item removed successfully');
+    console.log('Item removed successfully from session cart');
 
     return createSuccessResponse({
-      message: `Removed ${removeQty} ${cartItem.name} from cart`,
-      updatedCart: updatedCart,
-      cartSummary: cartSummary
+      message: `Removed ${removeQty} ${cartItem.name} from cart`
     });
 
   } catch (error) {
@@ -213,46 +353,34 @@ module.exports.getCartSummary = async (event) => {
       body = event.body;
     }
 
-    // Extract data - handle both direct format and Retell's nested format
-    let currentCart, taxRate;
-    
-    if (body.args) {
-      // Retell format: data is nested in 'args' object
-      currentCart = body.args.currentCart || [];
-      taxRate = body.args.taxRate || DEFAULT_TAX_RATE;
-      console.log('Using Retell format - args:', body.args);
-    } else {
-      // Direct format: data is at root level
-      currentCart = body.currentCart || [];
-      taxRate = body.taxRate || DEFAULT_TAX_RATE;
-      console.log('Using direct format');
+    // Extract call ID
+    const callId = extractCallId(body);
+    if (!callId) {
+      return createErrorResponse(400, 'Missing call ID in request');
     }
 
-    if (!currentCart.length) {
+    console.log(`Getting cart summary for call: ${callId}`);
+
+    // Get session cart
+    const sessionCart = await getSessionCart(callId);
+
+    if (!sessionCart.length) {
       return createSuccessResponse({
-        message: 'Cart is empty',
-        updatedCart: [],
-        cartSummary: {
-          items: [],
-          itemCount: 0,
-          subtotal: 0,
-          message: 'Tax will be calculated by Square at checkout'
-        }
+        message: 'Your cart is empty'
       });
     }
 
     // Calculate totals
-    const cartSummary = calculateCartTotals(currentCart);
+    const subtotal = sessionCart.reduce((sum, item) => sum + item.lineTotal, 0);
+    const itemCount = sessionCart.reduce((sum, item) => sum + item.quantity, 0);
 
-    // Create readable summary for AI
-    const readableSummary = createReadableSummary(currentCart, cartSummary);
+    // Create speech-friendly summary
+    const speechSummary = createSpeechFriendlySummary(sessionCart, subtotal);
 
-    console.log('Cart summary generated');
+    console.log('Cart summary generated for session cart');
 
     return createSuccessResponse({
-      message: readableSummary,
-      updatedCart: currentCart,
-      cartSummary: cartSummary
+      message: speechSummary
     });
 
   } catch (error) {
@@ -261,175 +389,141 @@ module.exports.getCartSummary = async (event) => {
   }
 };
 
-// Helper function to find menu item by name in DynamoDB (flexible matching)
-async function findMenuItem(itemName) {
+// Generate upsell suggestions based on current cart
+module.exports.upsell = async (event) => {
+  console.log('Generating upsell suggestions...');
+  
   try {
-    console.log(`Searching for menu item: ${itemName}`);
+    // Parse the request body
+    let body;
+    if (typeof event.body === 'string') {
+      body = JSON.parse(event.body);
+    } else {
+      body = event.body;
+    }
+
+    // Extract call ID
+    const callId = extractCallId(body);
+    if (!callId) {
+      return createErrorResponse(400, 'Missing call ID in request');
+    }
+
+    console.log(`Generating upsells for call: ${callId}`);
+
+    // Get session cart
+    const sessionCart = await getSessionCart(callId);
+
+    // Check what's already in cart
+    const cartItemNames = sessionCart.map(item => (item.item_name || item.name || '').toLowerCase());
     
-    // First, try exact match by item name
-    const exactParams = {
-      TableName: REDBIRD_MENU_TABLE,
-      KeyConditionExpression: 'item_name = :itemName',
-      ExpressionAttributeValues: {
-        ':itemName': itemName
+    // Check for items in cart
+    const hasFries = cartItemNames.some(item => item.includes('fries'));
+    const hasMac = cartItemNames.some(item => item.includes('mac'));
+    const hasSlaw = cartItemNames.some(item => item.includes('slaw'));
+    const hasToffee = cartItemNames.some(item => item.includes('toffee'));
+
+    // Start with base sentence and remove parts
+    let message = "Before I confirm, would you like to add ";
+    let parts = [];
+    
+    // Add fries if not in cart
+    if (!hasFries) {
+      parts.push("regular fries, cheese fries");
+    }
+    
+    // Add mac & cheese if not in cart
+    if (!hasMac) {
+      parts.push("mac & cheese");
+    }
+    
+    // Add slaw if not in cart
+    if (!hasSlaw) {
+      parts.push("slaw");
+    }
+    
+    // Add dessert part if toffee cake not in cart
+    let dessertPart = "";
+    if (!hasToffee) {
+      dessertPart = ", we also have toffee cake for dessert";
+    }
+    
+    // Build final message
+    if (parts.length === 0) {
+      message = "";
+    } else if (parts.length === 1) {
+      message += parts[0] + dessertPart + "?";
+    } else {
+      // Join with commas and add "or" before the last item
+      const lastItem = parts.pop();
+      message += parts.join(", ") + ", or " + lastItem + dessertPart + "?";
+    }
+
+    console.log('Upsell suggestions generated');
+
+    return createSuccessResponse({
+      message: message
+    });
+
+  } catch (error) {
+    console.error('Error generating upsell suggestions:', error);
+    return createErrorResponse(500, 'Internal server error', { details: error.message });
+  }
+};
+
+// Helper function to find menu item by name in location menu object (exact matching only)
+function findMenuItemInLocationMenu(itemName, locationMenu) {
+  try {
+    console.log(`Searching for item "${itemName}" in location menu`);
+    
+    // Normalize search term
+    const normalizedSearch = itemName.toLowerCase().trim();
+    
+    // Search through all menu items (excluding metadata fields)
+    const metadataFields = ['restaurantName', 'locationID', 'locationName', 'lastUpdated', 'itemCount'];
+    
+    for (const [menuItemName, menuItemData] of Object.entries(locationMenu)) {
+      // Skip metadata fields
+      if (metadataFields.includes(menuItemName)) {
+        continue;
       }
-    };
-    
-    let result = await dynamodb.query(exactParams).promise();
-    
-    if (result.Items && result.Items.length > 0) {
-      // Found exact match, return the raw DynamoDB item
-      const item = result.Items[0];
-      return item; // Return the complete DynamoDB record
-    }
-    
-    // If no exact match, scan for partial matches
-    console.log(`No exact match found, searching for partial matches...`);
-    
-    const scanParams = {
-      TableName: REDBIRD_MENU_TABLE
-    };
-    
-    result = await dynamodb.scan(scanParams).promise();
-    
-    if (!result.Items || result.Items.length === 0) {
-      console.log('No items found in menu table');
-      return null;
-    }
-    
-    const searchName = itemName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    
-    // Try partial matching
-    for (const item of result.Items) {
-      const menuName = item.item_name.toLowerCase().replace(/[^a-z0-9]/g, '');
       
-      if (menuName.includes(searchName) || searchName.includes(menuName)) {
-        return item; // Return the complete DynamoDB record
-      }
-    }
-    
-    // Special cases for common variations
-    const specialCases = {
-      'fries': 'Regular Fries',
-      'coke': 'Soda',
-      'cola': 'Soda',
-      'drink': 'Soda',
-      'water': 'Bottled Water',
-      'sandwich': 'Single Sandwich',
-      'nugget': '10pc Nuggets',
-      'tender': 'Single Tender',
-      'bowl': 'Chicken Rice Bowl',
-      'rice': 'Chicken Rice Bowl',
-      'mac': 'Mac & Cheese',
-      'cheese': 'Cheese Fries',
-      'cake': 'Toffee Cake',
-      'dessert': 'Toffee Cake'
-    };
-    
-    for (const [variation, menuItemName] of Object.entries(specialCases)) {
-      if (searchName.includes(variation) || variation.includes(searchName)) {
-        // Try to find this item
-        const specialParams = {
-          TableName: REDBIRD_MENU_TABLE,
-          KeyConditionExpression: 'item_name = :itemName',
-          ExpressionAttributeValues: {
-            ':itemName': menuItemName
-          }
-        };
+      // Normalize menu item name
+      const normalizedMenuName = menuItemName.toLowerCase().trim();
+      
+      // Check for exact match
+      if (normalizedMenuName === normalizedSearch) {
+        console.log(`Found exact match: ${menuItemName}`);
         
-        const specialResult = await dynamodb.query(specialParams).promise();
-        if (specialResult.Items && specialResult.Items.length > 0) {
-          const item = specialResult.Items[0];
-          return item;
-        }
+        // Transform to old format for compatibility
+        return {
+          item_name: menuItemData.name,
+          price_money: {
+            amount: menuItemData.price,
+            currency: menuItemData.currency
+          },
+          square_item_id: menuItemData.variations?.[0]?.itemVariationData?.itemId || '',
+          square_variation_id: menuItemData.variations?.[0]?.id || '',
+          description: menuItemData.description || '',
+          category_id: menuItemData.categoryId || ''
+        };
       }
     }
     
-    console.log(`No menu item found for: ${itemName}`);
+    // If no exact match, log available items
+    console.log(`No exact match found for: ${itemName}`);
+    console.log('Available menu items:');
+    Object.keys(locationMenu).forEach(key => {
+      if (!metadataFields.includes(key)) {
+        console.log(`  - ${key}`);
+      }
+    });
+    
     return null;
     
   } catch (error) {
-    console.error('Error finding menu item:', error);
+    console.error('Error finding menu item in location menu:', error);
     throw error;
   }
-}
-
-// Helper function to get similar items for suggestions from DynamoDB
-async function getSimilarItems(itemName) {
-  try {
-    const searchName = itemName.toLowerCase();
-    const suggestions = [];
-    
-    // Get all menu items from DynamoDB
-    const params = {
-      TableName: REDBIRD_MENU_TABLE
-    };
-    
-    const result = await dynamodb.scan(params).promise();
-    
-    if (result.Items && result.Items.length > 0) {
-      for (const item of result.Items) {
-        const itemNameLower = item.item_name.toLowerCase();
-        const words = searchName.split(/\s+/);
-        
-        // Check if any word from the search matches any word in the item name
-        const hasMatch = words.some(word => 
-          itemNameLower.includes(word) || word.includes(itemNameLower.split(' ')[0])
-        );
-        
-        if (hasMatch && !suggestions.includes(item.item_name)) {
-          suggestions.push(item.item_name);
-        }
-      }
-    }
-    
-    // If no matches, return some popular items
-    if (suggestions.length === 0) {
-      suggestions.push('Single Sandwich', 'Chicken Rice Bowl', '10pc Nuggets');
-    }
-    
-    return suggestions.slice(0, 3); // Return top 3 suggestions
-    
-  } catch (error) {
-    console.error('Error getting similar items:', error);
-    return ['Single Sandwich', 'Soda', 'Regular Fries']; // Fallback suggestions
-  }
-}
-
-// Helper function to calculate cart totals (Square handles tax)
-function calculateCartTotals(cartItems, taxRate = null) {
-  const subtotal = cartItems.reduce((sum, item) => sum + item.lineTotal, 0);
-  const itemCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
-
-  return {
-    items: cartItems,
-    itemCount: itemCount,
-    subtotal: Math.round(subtotal * 100) / 100,
-    // Remove tax calculation - Square handles this automatically
-    message: 'Tax will be calculated by Square at checkout'
-  };
-}
-
-// Helper function to create readable summary for AI
-function createReadableSummary(cartItems, cartSummary) {
-  if (!cartItems.length) {
-    return 'Your cart is empty.';
-  }
-
-  let summary = `Your order: `;
-  cartItems.forEach((item, index) => {
-    summary += `${item.quantity} ${item.name}`;
-    if (item.specialInstructions) {
-      summary += ` (${item.specialInstructions})`;
-    }
-    if (index < cartItems.length - 1) {
-      summary += ', ';
-    }
-  });
-
-  summary += `. Subtotal: $${cartSummary.subtotal}. Tax will be calculated by Square at checkout.`;
-  
-  return summary;
 }
 
 // Helper function to create success response

@@ -1,7 +1,7 @@
 // Test script for the new cart-based workflow
 require('dotenv').config();
 
-const { addToCart } = require('./cart');
+const { addToCart, getCartSummary } = require('./cart');
 const { createOrderAndPaymentLink } = require('./createOrderAndPaymentLink');
 
 async function testCartWorkflow() {
@@ -10,23 +10,25 @@ async function testCartWorkflow() {
   // Step 1: Start with empty cart and add items
   console.log('Step 1: Adding items to cart with DynamoDB validation');
   
-  let currentCart = [];
-  
   // Add first item
   const addItem1 = {
-    body: {
-      currentCart: currentCart,
-      itemName: 'Single Sandwich',
-      quantity: 2,
-      specialInstructions: 'No pickles'
-    }
+    body: JSON.stringify({
+      call: {
+        call_id: "test_workflow_123",
+        to_number: "+17037057917"  // Vienna location phone number
+      },
+      args: {
+        itemName: 'SINGLE SANDWICH',
+        quantity: 2,
+        specialInstructions: 'No pickles'
+      }
+    })
   };
   
   try {
     const result1 = await addToCart(addItem1);
     const parsed1 = JSON.parse(result1.body);
     console.log('✅ Added Single Sandwich:', parsed1.message);
-    currentCart = parsed1.updatedCart;
   } catch (error) {
     console.error('❌ Error adding first item:', error.message);
     return;
@@ -34,43 +36,55 @@ async function testCartWorkflow() {
 
   // Add second item
   const addItem2 = {
-    body: {
-      currentCart: currentCart,
-      itemName: 'Soda',
-      quantity: 1,
-      specialInstructions: 'Coca Cola'
-    }
+    body: JSON.stringify({
+      call: {
+        call_id: "test_workflow_123",
+        to_number: "+17037057917"  // Vienna location phone number
+      },
+      args: {
+        itemName: 'SODA',
+        quantity: 1,
+        specialInstructions: 'Coca Cola'
+      }
+    })
   };
   
   try {
     const result2 = await addToCart(addItem2);
     const parsed2 = JSON.parse(result2.body);
     console.log('✅ Added Soda:', parsed2.message);
-    currentCart = parsed2.updatedCart;
     
-    console.log('\n📋 Final Cart:');
-    currentCart.forEach((item, index) => {
-      console.log(`  ${index + 1}. ${item.name} x${item.quantity} = $${item.lineTotal.toFixed(2)}`);
-      if (item.specialInstructions) {
-        console.log(`     Note: ${item.specialInstructions}`);
-      }
-    });
-    console.log(`💰 Cart Subtotal: $${parsed2.cartSummary.subtotal} (+ tax by Square)`);
+    // Get cart summary to see final cart
+    console.log('\n📋 Getting Cart Summary:');
+    const cartSummaryRequest = {
+      body: JSON.stringify({
+        call: {
+          call_id: "test_workflow_123",
+          to_number: "+17037057917"  // Vienna location phone number
+        }
+      })
+    };
     
-    // Step 2: Create payment link from validated cart
+    const summaryResult = await getCartSummary(cartSummaryRequest);
+    const summaryParsed = JSON.parse(summaryResult.body);
+    console.log('Cart Summary:', summaryParsed.message);
+    
+    // Step 2: Create payment link from session cart
     console.log('\n' + '='.repeat(60));
-    console.log('Step 2: Creating payment link from validated cart');
+    console.log('Step 2: Creating payment link from session cart');
     
     const paymentRequest = {
-      body: {
-        updatedCart: parsed2.updatedCart,
-        cartSummary: parsed2.cartSummary,
+      body: JSON.stringify({
+        call: {
+          call_id: "test_workflow_123",
+          to_number: "+17037057917"  // Vienna location phone number
+        },
         customerInfo: {
           name: 'John Doe',
           phone: '+17039699580'
         },
         description: 'Voice AI Order - Cart Workflow Test'
-      }
+      })
     };
     
     const paymentResult = await createOrderAndPaymentLink(paymentRequest);

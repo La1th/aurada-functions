@@ -1,123 +1,177 @@
-// Test script for Square order creation and payment link
+// Test script for complete order and payment link workflow
 require('dotenv').config();
-const { createSquareOrder } = require('./createSquareOrder');
-const { createPaymentLink } = require('./createPaymentLink');
+const { createOrderAndPaymentLink } = require('./createOrderAndPaymentLink');
 const { randomUUID } = require('crypto');
 
-async function testEndToEnd() {
-  console.log('🧪 Testing End-to-End Order and Payment Link Creation\n');
+async function testCompleteWorkflow() {
+  console.log('🧪 Testing Complete Order and Payment Link Workflow\n');
 
-  // Step 1: Create the Order
-  console.log('--- Step 1: Creating Square Order ---');
-  const orderPayload = {
-    idempotencyKey: randomUUID(),
-    order: {
-      locationId: process.env.SQUARE_LOCATION_ID,
-      lineItems: [
-        { name: "Single Sandwich", quantity: "2", basePriceMoney: { amount: 499, currency: "USD" } },
-        { name: "Soda", quantity: "1", basePriceMoney: { amount: 229, currency: "USD" } }
-      ],
-      customerName: "Test Customer",
-      customerPhone: "+15005550006"
-    }
-  };
-
-  try {
-    const orderEvent = { body: JSON.stringify(orderPayload) };
-    const orderResult = await createSquareOrder(orderEvent);
-    const orderBody = JSON.parse(orderResult.body);
-
-    if (!orderBody.success || !orderBody.order || !orderBody.order.id) {
-      console.error('❌ FAILED! Square order creation failed.');
-      console.error('Response:', orderBody);
-      throw new Error('Order creation test failed.');
-    }
-
-    console.log('✅ SUCCESS! Square order created successfully!');
-    console.log(`🆔 Order ID: ${orderBody.order.id}`);
-    console.log(`💰 Total Amount: $${(parseInt(orderBody.order.totalMoney.amount) / 100).toFixed(2)}\n`);
-
-    // Store the original order payload for later use in creating the payment link
-    global.originalOrderPayload = orderPayload;
-
-  } catch (error) {
-    console.error('❌ Test failed during order creation:', error.message);
-    throw error;
-  }
-  
-  // Step 2: Create the Payment Link using the original order payload (remapped to expected format)
-  console.log('--- Step 2: Creating Payment Link (order-based) ---');
-
-  const originalOrder = global.originalOrderPayload.order;
-  const orderForPaymentLink = {
-    locationId: originalOrder.locationId,
-    lineItems: originalOrder.lineItems.map(item => ({
-      name: item.name,
-      quantity: item.quantity,
-      basePriceMoney: {
-        amount: item.basePriceMoney.amount,
-        currency: item.basePriceMoney.currency
+  // Test complete workflow: cart → order → payment link → SMS
+  console.log('--- Complete Workflow Test ---');
+  const cartData = {
+    updatedCart: [
+      {
+        item_name: "Single Sandwich",
+        price_money: { amount: "499", currency: "USD" },
+        square_item_id: "test-item-1",
+        square_variation_id: "test-variation-1",
+        description: "Delicious chicken sandwich",
+        quantity: 2,
+        specialInstructions: "",
+        unitPrice: 4.99,
+        lineTotal: 9.98,
+        itemId: "test-variation-1",
+        name: "Single Sandwich"
+      },
+      {
+        item_name: "Soda",
+        price_money: { amount: "229", currency: "USD" },
+        square_item_id: "test-item-2",
+        square_variation_id: "test-variation-2",
+        description: "Refreshing beverage",
+        quantity: 1,
+        specialInstructions: "",
+        unitPrice: 2.29,
+        lineTotal: 2.29,
+        itemId: "test-variation-2",
+        name: "Soda"
       }
-    }))
-  };
-
-  const linkPayload = {
-    order: orderForPaymentLink,
-    customerName: originalOrder.customerName,
-    customerPhone: originalOrder.customerPhone
+    ],
+    cartSummary: {
+      items: [], // Simplified for testing
+      itemCount: 3,
+      subtotal: 12.27,
+      message: "Tax will be calculated by Square at checkout"
+    },
+    customerInfo: {
+      name: "Test Customer",
+      phone: "+17039699580"
+    },
+    locationId: process.env.SQUARE_LOCATION_ID,
+    description: "Test order via Voice AI"
   };
 
   try {
-    const linkEvent = { body: JSON.stringify(linkPayload) };
-    const linkResult = await createPaymentLink(linkEvent);
-    const linkBody = JSON.parse(linkResult.body);
+    const event = {
+      rawPath: "/create-order-payment-link",
+      requestContext: { http: { method: "POST" } },
+      body: JSON.stringify(cartData)
+    };
+    
+    const result = await createOrderAndPaymentLink(event);
+    const responseBody = JSON.parse(result.body);
 
-    if (!linkBody.success || !linkBody.paymentLink || !linkBody.paymentLink.url) {
-      console.error('❌ FAILED! Payment link creation test failed.');
-      console.error('Response:', linkBody);
-      throw new Error('Payment link test failed.');
+    if (!responseBody.success || !responseBody.paymentLink || !responseBody.paymentLink.url) {
+      console.error('❌ FAILED! Complete workflow test failed.');
+      console.error('Response:', responseBody);
+      throw new Error('Complete workflow test failed.');
     }
 
-    console.log('✅ SUCCESS! Payment link created successfully!');
-    console.log(`💳 Payment URL: ${linkBody.paymentLink.url}`);
+    console.log('✅ SUCCESS! Complete workflow executed successfully!');
+    console.log(`🆔 Order ID: ${responseBody.paymentLink.orderId}`);
+    console.log(`💳 Payment URL: ${responseBody.paymentLink.url}`);
+    console.log(`💰 Subtotal: $${(responseBody.orderSummary.subtotal / 100).toFixed(2)}`);
+    console.log(`📦 Items: ${responseBody.orderSummary.itemCount}`);
+    console.log(`📱 SMS Result:`, responseBody.smsResult ? '✅ Sent' : '⚠️ Not sent');
 
   } catch (error) {
-    console.error('❌ Test failed during payment link creation:', error.message);
+    console.error('❌ Complete workflow test failed:', error.message);
     throw error;
   }
 }
 
-// Modify testPaymentLinkOnly to use the global original order payload
-async function testPaymentLinkOnly() {
-  console.log('🧪 Testing Payment Link Creation Only\n');
+async function testSandboxEnvironment() {
+  console.log('\n🧪 Testing Sandbox Environment\n');
   
-  if (!global.originalOrderPayload) {
-    console.error('No original order payload found from previous order creation test.');
-    throw new Error('Missing global original order payload');
-  }
-
-  const linkPayload = {
-    order: global.originalOrderPayload.order,
-    customerName: global.originalOrderPayload.order.customerName,
-    customerPhone: global.originalOrderPayload.order.customerPhone
+  console.log('--- Sandbox Environment Test ---');
+  const sandboxCartData = {
+    updatedCart: [
+      {
+        item_name: "Chicken Rice Bowl",
+        price_money: { amount: "799", currency: "USD" },
+        square_item_id: "sandbox-item-1",
+        square_variation_id: "sandbox-variation-1",
+        description: "Chicken bowl with rice",
+        quantity: 1,
+        specialInstructions: "Extra sauce",
+        unitPrice: 7.99,
+        lineTotal: 7.99,
+        itemId: "sandbox-variation-1",
+        name: "Chicken Rice Bowl"
+      }
+    ],
+    cartSummary: {
+      items: [],
+      itemCount: 1,
+      subtotal: 7.99,
+      message: "Tax will be calculated by Square at checkout"
+    },
+    customerInfo: {
+      name: "Sandbox Customer",
+      phone: "+15551234567"
+    },
+    locationId: process.env.SQUARE_LOCATION_ID
   };
 
   try {
-    const linkEvent = { body: JSON.stringify(linkPayload) };
-    const linkResult = await createPaymentLink(linkEvent);
-    const linkBody = JSON.parse(linkResult.body);
+    const event = {
+      rawPath: "/sandbox/create-order-payment-link", // Sandbox path
+      requestContext: { http: { method: "POST" } },
+      body: JSON.stringify(sandboxCartData)
+    };
+    
+    const result = await createOrderAndPaymentLink(event);
+    const responseBody = JSON.parse(result.body);
 
-    if (!linkBody.success || !linkBody.paymentLink || !linkBody.paymentLink.url) {
-      console.error('❌ FAILED! Payment link creation test failed.');
-      console.error('Response:', linkBody);
-      throw new Error('Payment link test failed.');
+    if (!responseBody.success || !responseBody.paymentLink || !responseBody.paymentLink.url) {
+      console.error('❌ FAILED! Sandbox test failed.');
+      console.error('Response:', responseBody);
+      throw new Error('Sandbox test failed.');
     }
 
-    console.log('✅ SUCCESS! Payment link created successfully!');
-    console.log(`💳 Payment URL: ${linkBody.paymentLink.url}`);
+    console.log('✅ SUCCESS! Sandbox environment works correctly!');
+    console.log(`💳 Sandbox Payment URL: ${responseBody.paymentLink.url}`);
+
   } catch (error) {
-    console.error('❌ Test failed during payment link creation:', error.message);
+    console.error('❌ Sandbox test failed:', error.message);
     throw error;
+  }
+}
+
+async function testErrorHandling() {
+  console.log('\n🧪 Testing Error Handling\n');
+  
+  console.log('--- Error Handling Test ---');
+  const invalidCartData = {
+    // Missing required updatedCart field
+    cartSummary: {
+      items: [],
+      itemCount: 0,
+      subtotal: 0,
+      message: "Empty cart"
+    }
+  };
+
+  try {
+    const event = {
+      rawPath: "/create-order-payment-link",
+      requestContext: { http: { method: "POST" } },
+      body: JSON.stringify(invalidCartData)
+    };
+    
+    const result = await createOrderAndPaymentLink(event);
+    const responseBody = JSON.parse(result.body);
+
+    if (result.statusCode === 400 && responseBody.error) {
+      console.log('✅ SUCCESS! Error handling works correctly!');
+      console.log(`⚠️ Expected error: ${responseBody.error}`);
+    } else {
+      console.error('❌ FAILED! Expected 400 error but got:', result.statusCode);
+      console.error('Response:', responseBody);
+    }
+
+  } catch (error) {
+    console.error('❌ Error handling test failed:', error.message);
   }
 }
 
@@ -128,18 +182,23 @@ async function testPaymentLinkOnly() {
     process.exit(1);
   }
   
-  console.log('🟢 Square credentials found, running tests...\n');
+  console.log('🟢 Square credentials found, running complete workflow tests...\n');
   
   try {
-    // Test both order creation and payment link creation together
-    await testEndToEnd();
+    // Test complete workflow
+    await testCompleteWorkflow();
     
     console.log('\n' + '='.repeat(50));
     
-    // Test payment link creation only using the original order payload
-    await testPaymentLinkOnly();
+    // Test sandbox environment
+    await testSandboxEnvironment();
     
-    console.log('\n🎉 All tests passed successfully!');
+    console.log('\n' + '='.repeat(50));
+    
+    // Test error handling
+    await testErrorHandling();
+    
+    console.log('\n🎉 All workflow tests completed successfully!');
   } catch (error) {
     console.error('\n💥 One or more tests failed.');
     process.exit(1);

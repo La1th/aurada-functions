@@ -1,88 +1,86 @@
-// Test script for Square order creation using pure Square API format
+// Test script for payment link creation using cart data format
 require('dotenv').config();
-const { createSquareOrder } = require('./createSquareOrder');
+const { createOrderAndPaymentLink } = require('./createOrderAndPaymentLink');
 
-async function testPureSquareOrderCreation() {
-  console.log('🧪 Testing Pure Square Order Creation\n');
+async function testOrderAndPaymentLink() {
+  console.log('🧪 Testing Order and Payment Link Creation\n');
 
-  // Test with exact Square API format
-  const squareOrderData = {
-    idempotencyKey: `test-order-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-    order: {
-      locationId: process.env.SQUARE_LOCATION_ID,
-      lineItems: [
-        {
-          uid: "line-item-1",
-          name: "Single Sandwich",
-          quantity: "2",
-          basePriceMoney: {
-            amount: 499, // $4.99 in cents - will be converted to BigInt in the function
-            currency: "USD"
-          }
-        },
-        {
-          uid: "line-item-2", 
-          name: "Soda",
-          quantity: "1",
-          basePriceMoney: {
-            amount: 229, // $2.29 in cents - will be converted to BigInt in the function
-            currency: "USD"
-          }
-        }
-      ],
-      metadata: {
-        customerPhone: "+17039699580",
-        customerName: "Test Customer",
-        source: "Voice AI Order"
+  // Test with cart data format (like from addToCart function)
+  const cartData = {
+    updatedCart: [
+      {
+        item_name: "Single Sandwich",
+        price_money: { amount: "499", currency: "USD" },
+        square_item_id: "test-item-1",
+        square_variation_id: "test-variation-1",
+        description: "Delicious chicken sandwich",
+        quantity: 2,
+        specialInstructions: "No pickles",
+        unitPrice: 4.99,
+        lineTotal: 9.98,
+        itemId: "test-variation-1",
+        name: "Single Sandwich"
       },
-      fulfillments: [{
-        type: "PICKUP",
-        state: "PROPOSED",
-        pickupDetails: {
-          recipient: {
-            displayName: "Test Customer"
-          },
-          note: "Order placed via Voice AI system"
-        }
-      }]
-    }
+      {
+        item_name: "Soda",
+        price_money: { amount: "229", currency: "USD" },
+        square_item_id: "test-item-2", 
+        square_variation_id: "test-variation-2",
+        description: "Refreshing soda",
+        quantity: 1,
+        specialInstructions: "",
+        unitPrice: 2.29,
+        lineTotal: 2.29,
+        itemId: "test-variation-2",
+        name: "Soda"
+      }
+    ],
+    cartSummary: {
+      items: [], // Would contain the same items but this is for testing
+      itemCount: 3,
+      subtotal: 12.27,
+      message: "Tax will be calculated by Square at checkout"
+    },
+    customerInfo: {
+      name: "Test Customer",
+      phone: "+17039699580"
+    },
+    locationId: process.env.SQUARE_LOCATION_ID
   };
 
-  const squareOrderRequest = {
-    body: JSON.stringify(squareOrderData)
+  const request = {
+    rawPath: "/create-order-payment-link", // Production path
+    requestContext: { http: { method: "POST" } },
+    body: JSON.stringify(cartData)
   };
 
   try {
-    console.log('Testing Square order creation with pure Square format...');
+    console.log('Testing order and payment link creation...');
     console.log('Request structure:', {
-      hasIdempotencyKey: !!squareOrderData.idempotencyKey,
-      hasOrder: !!squareOrderData.order,
-      lineItemsCount: squareOrderData.order.lineItems.length,
-      locationId: squareOrderData.order.locationId
+      hasUpdatedCart: !!cartData.updatedCart,
+      hasCartSummary: !!cartData.cartSummary,
+      itemCount: cartData.updatedCart.length,
+      locationId: cartData.locationId
     });
     
-    const result = await createSquareOrder(squareOrderRequest);
+    const result = await createOrderAndPaymentLink(request);
     
-    console.log('\n--- Pure Square Order Creation Response ---');
+    console.log('\n--- Order and Payment Link Response ---');
     console.log('Status Code:', result.statusCode);
     
     const responseBody = JSON.parse(result.body);
-    console.log('Response Body:', responseBody);
+    console.log('Response Body Keys:', Object.keys(responseBody));
     
     if (result.statusCode === 200) {
-      console.log('\n✅ SUCCESS! Pure Square order created successfully!');
-      console.log('🆔 Order ID:', responseBody.order.id);
-      console.log('📍 Location ID:', responseBody.order.locationId);
-      console.log('💰 Total Amount:', responseBody.order.totalMoney.amount, responseBody.order.totalMoney.currency);
-      console.log('📦 Line Items:', responseBody.order.lineItems.length);
-      console.log('🏷️  Order State:', responseBody.order.state);
+      console.log('\n✅ SUCCESS! Order and payment link created successfully!');
+      console.log('💳 Payment URL:', responseBody.paymentLink.url);
+      console.log('🆔 Order ID:', responseBody.paymentLink.orderId);
+      console.log('📦 Items:', responseBody.orderSummary.itemCount);
+      console.log('💰 Subtotal: $', (responseBody.orderSummary.subtotal / 100).toFixed(2));
     } else {
-      console.log('\n❌ FAILED! Square order creation failed');
+      console.log('\n❌ FAILED! Order and payment link creation failed');
       console.log('Error:', responseBody.error);
       console.log('Details:', responseBody.details);
-      if (responseBody.errors) {
-        console.log('Square Errors:', responseBody.errors);
-      }
     }
     
   } catch (error) {
@@ -90,47 +88,56 @@ async function testPureSquareOrderCreation() {
   }
 }
 
-// Test with minimum required fields
-async function testMinimalSquareOrder() {
-  console.log('\n🧪 Testing Minimal Square Order\n');
+// Test with minimal cart data
+async function testMinimalCart() {
+  console.log('\n🧪 Testing Minimal Cart Data\n');
 
-  const minimalOrderData = {
-    idempotencyKey: `minimal-order-${Date.now()}`,
-    order: {
-      locationId: process.env.SQUARE_LOCATION_ID,
-      lineItems: [
-        {
-          name: "Chicken Rice Bowl",
-          quantity: "1",
-          basePriceMoney: {
-            amount: 799, // $7.99 in cents - will be converted to BigInt in the function
-            currency: "USD"
-          }
-        }
-      ]
-    }
+  const minimalCartData = {
+    updatedCart: [
+      {
+        item_name: "Chicken Rice Bowl",
+        price_money: { amount: "799", currency: "USD" },
+        square_item_id: "test-item-3",
+        square_variation_id: "test-variation-3", 
+        description: "Chicken bowl with rice",
+        quantity: 1,
+        specialInstructions: "",
+        unitPrice: 7.99,
+        lineTotal: 7.99,
+        itemId: "test-variation-3",
+        name: "Chicken Rice Bowl"
+      }
+    ],
+    cartSummary: {
+      items: [],
+      itemCount: 1,
+      subtotal: 7.99,
+      message: "Tax will be calculated by Square at checkout"
+    },
+    locationId: process.env.SQUARE_LOCATION_ID
   };
 
-  const minimalOrderRequest = {
-    body: JSON.stringify(minimalOrderData)
+  const request = {
+    rawPath: "/create-order-payment-link",
+    requestContext: { http: { method: "POST" } },
+    body: JSON.stringify(minimalCartData)
   };
 
   try {
-    console.log('Testing minimal Square order creation...');
+    console.log('Testing minimal cart order creation...');
     
-    const result = await createSquareOrder(minimalOrderRequest);
+    const result = await createOrderAndPaymentLink(request);
     
-    console.log('\n--- Minimal Square Order Response ---');
+    console.log('\n--- Minimal Cart Response ---');
     console.log('Status Code:', result.statusCode);
     
     const responseBody = JSON.parse(result.body);
-    console.log('Response Body:', responseBody);
     
     if (result.statusCode === 200) {
-      console.log('\n✅ SUCCESS! Minimal Square order created successfully!');
-      console.log('🆔 Order ID:', responseBody.order.id);
+      console.log('\n✅ SUCCESS! Minimal cart order created successfully!');
+      console.log('💳 Payment URL:', responseBody.paymentLink.url);
     } else {
-      console.log('\n❌ FAILED! Minimal Square order creation failed');
+      console.log('\n❌ FAILED! Minimal cart order creation failed');
       console.log('Error:', responseBody.error);
     }
     
@@ -141,9 +148,9 @@ async function testMinimalSquareOrder() {
 
 // Only run test if environment variables are set
 if (process.env.SQUARE_ACCESS_TOKEN && process.env.SQUARE_LOCATION_ID) {
-  console.log('🟢 Square credentials found, running pure Square API tests...\n');
-  testPureSquareOrderCreation().then(() => {
-    return testMinimalSquareOrder();
+  console.log('🟢 Square credentials found, running order and payment link tests...\n');
+  testOrderAndPaymentLink().then(() => {
+    return testMinimalCart();
   });
 } else {
   console.log('⚠️  Please set up your .env file with Square credentials to run tests');
