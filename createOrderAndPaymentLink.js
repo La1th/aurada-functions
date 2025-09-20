@@ -412,7 +412,7 @@ async function sendPaymentLinkSMS(phoneNumber, paymentLinkUrl, orderSummary) {
       }
 
       // Format the SMS message with payment link (Square calculates final total)
-      const message = `🐔 Red Bird Chicken Order Ready! ${itemList}Subtotal: $${subtotal} (+ tax). Complete your payment here: ${paymentLinkUrl}`;
+      const message = `🐔 Red Bird Chicken Order Ready! ${itemList}Subtotal: $${subtotal} (+ tax). Complete your payment here: ${paymentLinkUrl}. Pick up at: 282 Cedar Ln SE, Vienna, VA 22180. `;
 
       // Prepare form data for TextBelt
       const formData = new URLSearchParams();

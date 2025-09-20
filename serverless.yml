@@ -72,6 +72,11 @@ provider:
             - arn:aws:dynamodb:${self:provider.region}:*:table/clientMenu
         - Effect: Allow
           Action:
+            - dynamodb:GetItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:*:table/clientDatabase
+        - Effect: Allow
+          Action:
             - secretsmanager:GetSecretValue
           Resource:
             - arn:aws:secretsmanager:${self:provider.region}:*:secret:square-api-keys*
@@ -103,27 +108,11 @@ functions:
           method: post
           cors: true
 
-  addToCartSandbox:
-    handler: cart.addToCart
-    events:
-      - http:
-          path: sandbox/add-to-cart
-          method: post
-          cors: true
-
   removeFromCart:
     handler: cart.removeFromCart
     events:
       - http:
           path: remove-from-cart
-          method: post
-          cors: true
-
-  removeFromCartSandbox:
-    handler: cart.removeFromCart
-    events:
-      - http:
-          path: sandbox/remove-from-cart
           method: post
           cors: true
 
@@ -135,14 +124,6 @@ functions:
           method: post
           cors: true
 
-  getCartSummarySandbox:
-    handler: cart.getCartSummary
-    events:
-      - http:
-          path: sandbox/get-cart-summary
-          method: post
-          cors: true
-
   upsell:
     handler: cart.upsell
     events:
@@ -151,27 +132,13 @@ functions:
           method: post
           cors: true
 
-  upsellSandbox:
-    handler: cart.upsell
+  addModifierToCart:
+    handler: cart.addModifierToCart
     events:
       - http:
-          path: sandbox/upsell
+          path: add-modifier-to-cart
           method: post
           cors: true
-
-  createPaymentLink:
-    handler: createPaymentLink.createPaymentLink
-    events:
-      - httpApi:
-          path: /create-payment-link
-          method: post
-
-  createPaymentLinkSandbox:
-    handler: createPaymentLink.createPaymentLink
-    events:
-      - httpApi:
-          path: /sandbox/create-payment-link
-          method: post
 
   createOrderAndPaymentLink:
     handler: createOrderAndPaymentLink.createOrderAndPaymentLink
@@ -190,43 +157,6 @@ functions:
           method: post
     timeout: 60  # Increase to 60 seconds for complete workflow
     memorySize: 512  # Increase memory for better performance
-
-  syncCatalog:
-    handler: syncCatalog.syncCatalog
-    events:
-      - httpApi:
-          path: /sync-catalog
-          method: post
-    timeout: 300  # 5 minutes for catalog sync
-
-  syncCatalogSandbox:
-    handler: syncCatalog.syncCatalog
-    events:
-      - httpApi:
-          path: /sandbox/sync-catalog
-          method: post
-    timeout: 300  # 5 minutes for catalog sync
-
-  getCatalog:
-    handler: syncCatalog.getCatalog
-    events:
-      - httpApi:
-          path: /get-catalog
-          method: get
-      - httpApi:
-          path: /get-catalog
-          method: post
-
-  getCatalogSandbox:
-    handler: syncCatalog.getCatalog
-    events:
-      - httpApi:
-          path: /sandbox/get-catalog
-          method: get
-      - httpApi:
-          path: /sandbox/get-catalog
-          method: post
-
   squareAuthorize:
     handler: squareAuthorize.authorize
     events:

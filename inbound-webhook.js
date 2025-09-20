@@ -7,37 +7,108 @@ AWS.config.update({
 const dynamodb = new AWS.DynamoDB.DocumentClient();
 
 const PHONE_NUMBER_CLIENT_MAP_TABLE = 'phoneNumberClientMap';
+const CLIENT_DATABASE_TABLE = 'clientDatabase';
 const CLIENT_MENU_TABLE = 'clientMenu';
 
-// Helper function to calculate store status based on current time
-function calculateStoreStatus() {
-  // Get current time in Eastern Time (assuming Red Bird Chicken is in ET)
+// Helper function to parse hours string (e.g., "11:00-22:00")
+function parseHours(hoursString) {
+  if (!hoursString) return null;
+  
+  const [openStr, closeStr] = hoursString.split('-');
+  if (!openStr || !closeStr) return null;
+  
+  const [openHour, openMin] = openStr.split(':').map(Number);
+  const [closeHour, closeMin] = closeStr.split(':').map(Number);
+  
+  const openTime = openHour * 60 + openMin;
+  const closeTime = closeHour * 60 + closeMin;
+  
+  return { openTime, closeTime };
+}
+
+// Helper function to format time for speech (e.g., "11:00" -> "11:00 AM")
+function formatTimeForSpeech(timeString) {
+  if (!timeString) return '';
+  
+  const [hour, minute] = timeString.split(':').map(Number);
+  const period = hour >= 12 ? 'PM' : 'AM';
+  const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+  
+  return `${displayHour}:${minute.toString().padStart(2, '0')} ${period}`;
+}
+
+// Helper function to format hours range for speech
+function formatHoursForSpeech(hoursString) {
+  if (!hoursString) return 'hours not available';
+  
+  const [openStr, closeStr] = hoursString.split('-');
+  const openFormatted = formatTimeForSpeech(openStr);
+  const closeFormatted = formatTimeForSpeech(closeStr);
+  
+  return `${openFormatted} to ${closeFormatted}`;
+}
+
+// Helper function to format all weekly hours for speech
+function formatWeeklyHoursForSpeech(restaurantHours) {
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  
+  const formattedHours = [];
+  
+  dayNames.forEach((dayName) => {
+    const dayHours = restaurantHours[dayName];
+    if (dayHours) {
+      const formattedRange = formatHoursForSpeech(dayHours);
+      formattedHours.push(`${dayName}: ${formattedRange}`);
+    } else {
+      formattedHours.push(`${dayName}: closed`);
+    }
+  });
+  
+  return formattedHours.join(', ');
+}
+
+// Helper function to calculate store status based on dynamic hours
+function calculateDynamicStoreStatus(restaurantHours) {
+  // Get current time in Eastern Time
   const now = new Date();
   const easternTime = new Date(now.toLocaleString("en-US", {timeZone: "America/New_York"}));
   
   const dayOfWeek = easternTime.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-  const currentHour = easternTime.getHours();
-  const currentMinute = easternTime.getMinutes();
-  const currentTimeInMinutes = currentHour * 60 + currentMinute;
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const todayName = dayNames[dayOfWeek];
   
-  // Store hours in minutes from midnight
-  const openTime = 11 * 60; // 11:00 AM = 660 minutes
-  let closeTime;
-  
-  if (dayOfWeek === 0) {
-    // Sunday: 11:00 AM - 9:00 PM
-    closeTime = 21 * 60; // 9:00 PM = 1260 minutes
-  } else {
-    // Monday-Saturday: 11:00 AM - 10:00 PM  
-    closeTime = 22 * 60; // 10:00 PM = 1320 minutes
+  // Get today's hours
+  const todayHours = restaurantHours[todayName];
+  if (!todayHours) {
+    return {
+      status: "store hours not available.",
+      allHours: formatWeeklyHoursForSpeech(restaurantHours)
+    };
   }
   
-  // Check if current time is within operating hours
-  if (currentTimeInMinutes >= openTime && currentTimeInMinutes < closeTime) {
-    return "store is open.";
-  } else {
-    return "store is closed. You cannot order at this time. Please call back when we are open to place an order.";
+  // Parse hours
+  const parsedHours = parseHours(todayHours);
+  if (!parsedHours) {
+    return {
+      status: "store hours not available.",
+      allHours: formatWeeklyHoursForSpeech(restaurantHours)
+    };
   }
+  
+  // Check if currently open
+  const currentTimeInMinutes = easternTime.getHours() * 60 + easternTime.getMinutes();
+  const isOpen = currentTimeInMinutes >= parsedHours.openTime && currentTimeInMinutes < parsedHours.closeTime;
+  
+  const status = isOpen ? 
+    "store is open." : 
+    "store is closed. You cannot order at this time. Please call back when we are open to place an order.";
+    
+  const allHoursFormatted = formatWeeklyHoursForSpeech(restaurantHours);
+  
+  return {
+    status: status,
+    allHours: allHoursFormatted
+  };
 }
 
 module.exports.handleInboundCall = async (event) => {
@@ -110,23 +181,35 @@ module.exports.handleInboundCall = async (event) => {
     console.log('Extracted from_number (customer):', fromNumber);
     console.log('Extracted to_number (restaurant):', toNumber);
 
-    // Fetch menu items from DynamoDB
-    const menuItemNames = await getLocationSpecificMenuItemNames(toNumber);
-    
-    // Calculate store status
-    const storeStatus = calculateStoreStatus();
-    console.log('Store status calculated:', storeStatus);
+    // Step 1: Get location ID from phone number
+    const locationData = await getLocationFromPhoneNumber(toNumber);
+    console.log(`Found location ID: ${locationData.locationId}`);
 
-    // Return the response with caller_number and menu_item_names as dynamic variables
+    // Step 2: Get restaurant details from clientDatabase
+    const restaurantData = await getRestaurantDetails(locationData.locationId);
+    console.log(`Found restaurant: ${restaurantData.restaurantName} at ${restaurantData.address}`);
+
+    // Step 3: Calculate dynamic store status using database hours
+    const storeInfo = calculateDynamicStoreStatus(restaurantData.hours);
+    console.log('Store status calculated:', storeInfo.status);
+
+    // Step 4: Get location-specific menu items
+    const menuItemNames = await getLocationSpecificMenuItems(restaurantData.restaurantName, locationData.locationId);
+
+    // Return the response with enhanced dynamic variables
     const response = {
       call_inbound: {
         dynamic_variables: {
           caller_number: fromNumber,
+          restaurant_name: restaurantData.restaurantName,
+          restaurant_address: restaurantData.address,
           menu_item_names: menuItemNames.join(', '),
-          store_status: storeStatus
+          store_status: storeInfo.status,
+          store_hours: storeInfo.allHours
         },
         metadata: {
-          request_timestamp: new Date().toISOString()
+          request_timestamp: new Date().toISOString(),
+          location_id: locationData.locationId
         }
       }
     };
@@ -161,28 +244,62 @@ module.exports.handleInboundCall = async (event) => {
   }
 }; 
 
-// Helper function to get location-specific menu item names from clientMenu table
-async function getLocationSpecificMenuItemNames(restaurantPhone) {
+// Helper function to get location ID from phone number
+async function getLocationFromPhoneNumber(phoneNumber) {
   try {
-    console.log(`Fetching location-specific menu for restaurant phone: ${restaurantPhone}`);
+    console.log(`Looking up location for phone number: ${phoneNumber}`);
     
-    // Step 1: Get location from phone number
-    const locationParams = {
+    const params = {
       TableName: PHONE_NUMBER_CLIENT_MAP_TABLE,
-      Key: { phoneNumber: restaurantPhone }
+      Key: { phoneNumber: phoneNumber }
     };
     
-    const locationResult = await dynamodb.get(locationParams).promise();
+    const result = await dynamodb.get(params).promise();
     
-    if (!locationResult.Item) {
-      throw new Error(`No location found for phone number: ${restaurantPhone}`);
+    if (!result.Item) {
+      throw new Error(`No location found for phone number: ${phoneNumber}`);
     }
     
-    const { locationId, restaurantName } = locationResult.Item;
-    console.log(`Found location: ${restaurantName} - ${locationId}`);
+    console.log(`Found location ID: ${result.Item.locationId}`);
+    return {
+      locationId: result.Item.locationId
+    };
+  } catch (error) {
+    console.error('Error looking up location:', error);
+    throw error;
+  }
+}
+
+// Helper function to get restaurant details from clientDatabase
+async function getRestaurantDetails(locationId) {
+  try {
+    console.log(`Getting restaurant details for location: ${locationId}`);
     
-    // Step 2: Get location-specific menu
-    const menuParams = {
+    const params = {
+      TableName: CLIENT_DATABASE_TABLE,
+      Key: { locationId: locationId }
+    };
+    
+    const result = await dynamodb.get(params).promise();
+    
+    if (!result.Item) {
+      throw new Error(`No restaurant found for location ID: ${locationId}`);
+    }
+    
+    console.log(`Found restaurant: ${result.Item.restaurantName}`);
+    return result.Item;
+  } catch (error) {
+    console.error('Error getting restaurant details:', error);
+    throw error;
+  }
+}
+
+// Helper function to get location-specific menu items from clientMenu table
+async function getLocationSpecificMenuItems(restaurantName, locationId) {
+  try {
+    console.log(`Getting menu for: ${restaurantName} at location: ${locationId}`);
+    
+    const params = {
       TableName: CLIENT_MENU_TABLE,
       Key: { 
         restaurantName: restaurantName,
@@ -190,17 +307,17 @@ async function getLocationSpecificMenuItemNames(restaurantPhone) {
       }
     };
     
-    const menuResult = await dynamodb.get(menuParams).promise();
+    const result = await dynamodb.get(params).promise();
     
-    if (!menuResult.Item) {
+    if (!result.Item) {
       throw new Error(`No menu found for ${restaurantName} at location ${locationId}`);
     }
     
-    console.log(`Found menu with ${menuResult.Item.itemCount || 'unknown'} items`);
+    console.log(`Found menu with ${result.Item.itemCount || 'unknown'} items`);
     
-    // Step 3: Extract menu item names (skip metadata fields)
+    // Extract menu item names (skip metadata fields)
     const metadataFields = ['restaurantName', 'locationID', 'locationName', 'lastUpdated', 'itemCount'];
-    const menuItemNames = Object.entries(menuResult.Item)
+    const menuItemNames = Object.entries(result.Item)
       .filter(([key, value]) => !metadataFields.includes(key))
       .map(([itemName, itemData]) => {
         // Extract price from itemData
@@ -210,12 +327,11 @@ async function getLocationSpecificMenuItemNames(restaurantPhone) {
       })
       .sort();
     
-    console.log(`Retrieved ${menuItemNames.length} unique menu item names for ${restaurantName}`);
-    
+    console.log(`Retrieved ${menuItemNames.length} menu items`);
     return menuItemNames;
     
   } catch (error) {
-    console.error('Error fetching location-specific menu items:', error);
-    throw error; // No fallback - force proper setup
+    console.error('Error getting menu items:', error);
+    throw error;
   }
 } 

@@ -119,12 +119,87 @@ async function saveSessionCart(callId, cartItems) {
   }
 }
 
+// Helper function to convert technical modifier names to natural speech
+function convertModifierToSpeech(modifierName) {
+  // Spice levels
+  if (modifierName === 'Original') return 'original';
+  if (modifierName === 'Mild') return 'mild';
+  if (modifierName === 'Medium') return 'medium';
+  if (modifierName === 'Hot') return 'hot';
+  if (modifierName === 'Extra Hot') return 'extra hot';
+  if (modifierName === 'FCK YOU CRA') return 'f you cray';
+  
+  // Add/Remove modifiers (remove piece numbers)
+  if (modifierName.includes('Add cheese')) return 'with cheese';
+  if (modifierName.includes('No cheese')) return 'no cheese';
+  if (modifierName.includes('No Pickles')) return 'no pickles';
+  if (modifierName.includes('No Slaw')) return 'no slaw';
+  if (modifierName.includes('No Big Bird Sauce')) return 'no sauce';
+  if (modifierName === 'Add tender') return 'with extra tender';
+  
+  // Side options
+  if (modifierName === 'Pickles on the side') return 'pickles on the side';
+  if (modifierName === 'Slaw on the side') return 'slaw on the side';
+  if (modifierName === 'Chicken & Bun Only') return 'chicken and bun only';
+  
+  // Substitutions
+  if (modifierName === 'Substitute fries with mac & cheese') return 'substitute fries with mac and cheese';
+  if (modifierName === 'Substitute fries with slaw') return 'substitute fries with slaw';
+  if (modifierName.includes('Substitute Slaw with Lettuce')) return 'substitute slaw with lettuce';
+  
+  // Default: return cleaned up version
+  return modifierName.toLowerCase().replace(/\d+$/, '').trim();
+}
+
+// Helper function to group modifiers by piece and create speech descriptions
+function createModifierDescription(modifiers) {
+  if (!modifiers || modifiers.length === 0) {
+    return '';
+  }
+  
+  // Group modifiers by piece number
+  const piece1Modifiers = [];
+  const piece2Modifiers = [];
+  const wholeItemModifiers = [];
+  
+  modifiers.forEach(modifier => {
+    const speechText = convertModifierToSpeech(modifier.optionName);
+    
+    // Extract piece number from modifier name
+    if (modifier.optionName.endsWith(' 1')) {
+      piece1Modifiers.push(speechText);
+    } else if (modifier.optionName.endsWith(' 2')) {
+      piece2Modifiers.push(speechText);
+    } else {
+      wholeItemModifiers.push(speechText);
+    }
+  });
+  
+  const descriptions = [];
+  
+  // Add piece-specific descriptions
+  if (piece1Modifiers.length > 0) {
+    descriptions.push(`first sandwich ${piece1Modifiers.join(' ')}`);
+  }
+  
+  if (piece2Modifiers.length > 0) {
+    descriptions.push(`second sandwich ${piece2Modifiers.join(' ')}`);
+  }
+  
+  // Add whole-item descriptions
+  if (wholeItemModifiers.length > 0) {
+    descriptions.push(...wholeItemModifiers);
+  }
+  
+  return descriptions.length > 0 ? ` - ${descriptions.join(', ')}` : '';
+}
+
 function createSpeechFriendlySummary(sessionCart, subtotal) {
   if (!sessionCart || sessionCart.length === 0) {
     return "Your cart is empty.";
   }
 
-  // Create speech-friendly item descriptions
+  // Create speech-friendly item descriptions with modifiers
   const speechItems = sessionCart.map(item => {
     let itemName = item.item_name || item.name || 'Unknown Item';
     
@@ -134,7 +209,11 @@ function createSpeechFriendlySummary(sessionCart, subtotal) {
     itemName = itemName.replace(/FCK YOU CRA/g, 'F You Cray'); // FCK YOU CRA -> F You Cray
     
     const quantity = item.quantity || 1;
-    return `${quantity} ${itemName}`;
+    
+    // Add modifier description
+    const modifierDescription = createModifierDescription(item.modifiers);
+    
+    return `${quantity} ${itemName}${modifierDescription}`;
   });
 
   // Create the summary message
@@ -466,6 +545,203 @@ module.exports.upsell = async (event) => {
 
   } catch (error) {
     console.error('Error generating upsell suggestions:', error);
+    return createErrorResponse(500, 'Internal server error', { details: error.message });
+  }
+};
+
+// Add modifier to cart
+module.exports.addModifierToCart = async (event) => {
+  console.log('Adding modifier to cart...');
+  
+  try {
+    // Parse the request body
+    let body;
+    if (typeof event.body === 'string') {
+      body = JSON.parse(event.body);
+    } else {
+      body = event.body;
+    }
+
+    // Extract call ID
+    const callId = extractCallId(body);
+    if (!callId) {
+      return createErrorResponse(400, 'Missing call ID in request');
+    }
+
+    // Extract phone number from Retell payload
+    const phoneNumber = extractPhoneNumber(body);
+    if (!phoneNumber) {
+      return createErrorResponse(400, 'Missing phone number in request - cannot determine location');
+    }
+
+    // Extract modifier data from args
+    const itemName = body.args?.itemName;
+    const modification = body.args?.modification;
+
+    console.log(`Adding modifier for call ${callId}:`, { 
+      phoneNumber, 
+      itemName, 
+      modification
+    });
+
+    // Validate inputs
+    if (!itemName) {
+      return createErrorResponse(400, 'Missing required field: itemName');
+    }
+
+    if (!modification) {
+      return createErrorResponse(400, 'Missing required field: modification');
+    }
+
+    // Step 1: Get location from phone number
+    let locationData;
+    try {
+      locationData = await getLocationFromPhoneNumber(phoneNumber);
+    } catch (error) {
+      return createErrorResponse(404, `Location lookup failed: ${error.message}`);
+    }
+
+    // Step 2: Get location-specific menu
+    let locationMenu;
+    try {
+      locationMenu = await getLocationMenu(locationData.restaurantName, locationData.locationId);
+    } catch (error) {
+      return createErrorResponse(404, `Menu lookup failed: ${error.message}`);
+    }
+
+    // Step 3: Find item in location menu
+    const menuItem = findMenuItemInLocationMenu(itemName, locationMenu);
+    if (!menuItem) {
+      return createErrorResponse(404, `Item "${itemName}" not found in ${locationData.restaurantName} menu`);
+    }
+
+    // Step 4: Get raw menu item data for modifier access
+    const metadataFields = ['restaurantName', 'locationID', 'locationName', 'lastUpdated', 'itemCount'];
+    let rawMenuItemData = null;
+    
+    for (const [menuItemName, menuItemData] of Object.entries(locationMenu)) {
+      if (metadataFields.includes(menuItemName)) continue;
+      
+      if (menuItemName.toLowerCase().trim() === itemName.toLowerCase().trim()) {
+        rawMenuItemData = menuItemData;
+        break;
+      }
+    }
+
+    if (!rawMenuItemData) {
+      return createErrorResponse(404, `Raw menu data not found for "${itemName}"`);
+    }
+
+    // Step 5: Validate modification exists in item's modifiers
+    let modifierFound = false;
+    let modifierDetails = null;
+
+    // Create list of modifiers to try
+    const modifiersToTry = [modification]; // Start with exact match
+
+    // If modification ends with " 1" or " 2", also try the base version
+    if (modification.endsWith(' 1') || modification.endsWith(' 2')) {
+      const baseModification = modification.slice(0, -2); // Remove " 1" or " 2"
+      modifiersToTry.push(baseModification);
+    }
+
+    if (rawMenuItemData.modifiers && Object.keys(rawMenuItemData.modifiers).length > 0) {
+      // Search through all modifier lists for this item
+      for (const [modifierListId, modifierList] of Object.entries(rawMenuItemData.modifiers)) {
+        if (!modifierList.options) continue;
+
+        // Try each modifier variation
+        for (const modToTry of modifiersToTry) {
+          const option = modifierList.options.find(opt => opt.name === modToTry);
+          
+          if (option) {
+            modifierFound = true;
+            modifierDetails = {
+              modifierListId: modifierListId,
+              modifierListName: modifierList.name,
+              optionId: option.id,
+              optionName: option.name,
+              price: option.price || 0,
+              currency: option.currency || 'USD'
+            };
+            console.log(`Modifier matched: requested "${modification}", found "${option.name}"${modToTry !== modification ? ' (fallback)' : ''}`);
+            break; // Exit inner loop
+          }
+        }
+        
+        if (modifierFound) break; // Exit outer loop if found
+      }
+    }
+
+    if (!modifierFound) {
+      return createErrorResponse(404, `Modifier "${modification}" not available for "${itemName}"`);
+    }
+
+    // Step 6: Get session cart and find most recent matching item
+    const sessionCart = await getSessionCart(callId);
+    
+    // Find the most recent cart item with matching name (reverse search)
+    let targetCartItemIndex = -1;
+    for (let i = sessionCart.length - 1; i >= 0; i--) {
+      if (sessionCart[i].item_name === itemName || sessionCart[i].name === itemName) {
+        targetCartItemIndex = i;
+        break;
+      }
+    }
+
+    if (targetCartItemIndex === -1) {
+      return createErrorResponse(404, `No "${itemName}" found in cart to modify. Add the item first.`);
+    }
+
+    // Step 7: Add modifier to cart item
+    const cartItem = sessionCart[targetCartItemIndex];
+    
+    // Initialize modifiers array if it doesn't exist
+    if (!cartItem.modifiers) {
+      cartItem.modifiers = [];
+    }
+
+    // Check if this modifier already exists (prevent duplicates)
+    const existingModifier = cartItem.modifiers.find(mod => 
+      mod.optionId === modifierDetails.optionId
+    );
+    
+    if (existingModifier) {
+      return createErrorResponse(400, `Modifier "${modifierDetails.optionName}" already applied to this item`);
+    }
+
+    // Add the new modifier
+    const newModifier = {
+      modifierListId: modifierDetails.modifierListId,
+      modifierListName: modifierDetails.modifierListName,
+      optionId: modifierDetails.optionId,
+      optionName: modifierDetails.optionName,
+      price: modifierDetails.price / 100, // Convert cents to dollars
+      currency: modifierDetails.currency
+    };
+
+    cartItem.modifiers.push(newModifier);
+
+    // Step 8: Recalculate total price
+    const modifierTotal = cartItem.modifiers.reduce((sum, mod) => sum + (mod.price || 0), 0);
+    cartItem.lineTotal = (cartItem.unitPrice + modifierTotal) * cartItem.quantity;
+
+    // Step 9: Save updated cart
+    await saveSessionCart(callId, sessionCart);
+
+    console.log('Modifier added successfully to cart item');
+
+    return createSuccessResponse({
+      message: `Added "${modifierDetails.optionName}" to ${itemName}`,
+      modifierAdded: {
+        name: modifierDetails.optionName,
+        price: newModifier.price
+      },
+      newItemTotal: cartItem.lineTotal
+    });
+
+  } catch (error) {
+    console.error('Error adding modifier to cart:', error);
     return createErrorResponse(500, 'Internal server error', { details: error.message });
   }
 };
